@@ -1,0 +1,99 @@
+# EduPlatform local stack
+# Usage:
+#   docker compose up --build
+#   docker compose down -v   # also wipes the DB volume
+#
+# All secrets read from the host .env (see .env.example). Never commit a real .env.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: eduplatform-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB:-eduplatform}
+      POSTGRES_USER:     ${POSTGRES_USER:-eduplatform}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-eduplatform}
+    ports:
+      - "5432:5432"
+    volumes:
+      - eduplatform-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: eduplatform-backend:local
+    container_name: eduplatform-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    environment:
+      # This compose file is the LOCAL stack, so it defaults to dev (seed accounts +
+      # Swagger). Deployments run the image as-is, which defaults to prod.
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-dev}
+
+      # --- Required: the app defines no datasource defaults outside the dev profile. ---
+      DATABASE_URL:      jdbc:postgresql://postgres:5432/${POSTGRES_DB:-eduplatform}
+      DATABASE_USERNAME: ${POSTGRES_USER:-eduplatform}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-eduplatform}
+
+      # Server
+      SERVER_PORT:  8080
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8080}
+
+      # Frontends / CORS
+      FRONTEND_PUBLIC_URL:  ${FRONTEND_PUBLIC_URL:-http://localhost:3000}
+      FRONTEND_PORTAL_URL:  ${FRONTEND_PORTAL_URL:-http://localhost:3001}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:5174}
+
+      # JWT
+      JWT_ISSUER:           ${JWT_ISSUER:-eduplatform}
+      JWT_ACCESS_SECRET:    ${JWT_ACCESS_SECRET:?Set JWT_ACCESS_SECRET (>=32 bytes) in .env}
+      JWT_ACCESS_TTL_MIN:   ${JWT_ACCESS_TTL_MIN:-15}
+      JWT_REFRESH_TTL_DAYS: ${JWT_REFRESH_TTL_DAYS:-30}
+
+      # Mail
+      MAIL_HOST:     ${MAIL_HOST:-}
+      MAIL_PORT:     ${MAIL_PORT:-587}
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+
+      # OAuth — leave blank to disable each provider
+      OAUTH_GOOGLE_CLIENT_ID:     ${OAUTH_GOOGLE_CLIENT_ID:-}
+      OAUTH_GOOGLE_CLIENT_SECRET: ${OAUTH_GOOGLE_CLIENT_SECRET:-}
+      OAUTH_FACEBOOK_APP_ID:      ${OAUTH_FACEBOOK_APP_ID:-}
+      OAUTH_FACEBOOK_APP_SECRET:  ${OAUTH_FACEBOOK_APP_SECRET:-}
+      APPLE_TEAM_ID:              ${APPLE_TEAM_ID:-}
+      APPLE_SERVICES_ID:          ${APPLE_SERVICES_ID:-}
+      APPLE_KEY_ID:               ${APPLE_KEY_ID:-}
+      APPLE_PRIVATE_KEY_PEM:      ${APPLE_PRIVATE_KEY_PEM:-}
+
+      # Storage
+      STORAGE_PROVIDER:   ${STORAGE_PROVIDER:-LOCAL}
+      STORAGE_LOCAL_DIR:  /var/uploads
+      S3_BUCKET:          ${S3_BUCKET:-}
+      S3_REGION:          ${S3_REGION:-}
+      S3_ACCESS_KEY:      ${S3_ACCESS_KEY:-}
+      S3_SECRET_KEY:      ${S3_SECRET_KEY:-}
+
+    volumes:
+      - eduplatform-uploads:/var/uploads
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+volumes:
+  eduplatform-pgdata:
+  eduplatform-uploads:
