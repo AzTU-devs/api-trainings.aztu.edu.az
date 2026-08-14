@@ -35,6 +35,8 @@ public record CourseDto(
         int enrolledCount,
         UUID tutorId,
         String tutorDisplayName,
+        /** Full teaching roster; tutorId above is the one authorised to edit. */
+        List<CourseTutorDto> tutors,
         Set<UUID> categoryIds,
         Set<UUID> tagIds,
         OnlineDetailsDto onlineDetails,

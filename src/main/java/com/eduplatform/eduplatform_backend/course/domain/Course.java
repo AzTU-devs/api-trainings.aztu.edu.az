@@ -146,4 +146,21 @@ public class Course extends SoftDeletable {
     @BatchSize(size = 50)
     @Builder.Default
     private Set<Tag> tags = new HashSet<>();
+
+    /**
+     * The full teaching roster. A training may be taught by several tutors; the
+     * course itself belongs to the university, not to any of them.
+     *
+     * <p>{@link #tutor} is the single tutor authorised to edit the course and is
+     * always also present in this set — keep the two consistent when assigning
+     * (see {@code CourseTutorAssignmentService}).
+     */
+    @ManyToMany(fetch = FetchType.LAZY)
+    @JoinTable(
+            name = "course_tutors",
+            joinColumns = @JoinColumn(name = "course_id"),
+            inverseJoinColumns = @JoinColumn(name = "tutor_id"))
+    @BatchSize(size = 50)
+    @Builder.Default
+    private Set<TutorProfile> tutors = new HashSet<>();
 }

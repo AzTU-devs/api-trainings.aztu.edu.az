@@ -14,9 +14,11 @@ import com.eduplatform.eduplatform_backend.course.domain.Course;
 import com.eduplatform.eduplatform_backend.course.domain.OfflineCourseDetails;
 import com.eduplatform.eduplatform_backend.course.domain.OnlineCourseDetails;
 import com.eduplatform.eduplatform_backend.course.repo.CourseRepository;
+import com.eduplatform.eduplatform_backend.course.web.dto.AdminCreateCourseRequest;
 import com.eduplatform.eduplatform_backend.course.web.dto.CreateCourseRequest;
 import com.eduplatform.eduplatform_backend.course.web.dto.OfflineDetailsDto;
 import com.eduplatform.eduplatform_backend.course.web.dto.OnlineDetailsDto;
+import com.eduplatform.eduplatform_backend.course.web.dto.SetCourseTutorsRequest;
 import com.eduplatform.eduplatform_backend.course.web.dto.UpdateCourseRequest;
 import com.eduplatform.eduplatform_backend.tutor.domain.TutorProfile;
 import com.eduplatform.eduplatform_backend.tutor.repo.TutorProfileRepository;
@@ -101,6 +103,15 @@ public class CourseService {
         if (c.getTutor() != null) {
             c.getTutor().getUser().getFirstName();   // init tutor + user for display name
         }
+        // The teaching roster is mapped into BOTH the summary and detail DTOs, and the
+        // mapper runs after the transaction closes — leaving it lazy throws
+        // LazyInitializationException on every course response. @BatchSize(50) on the
+        // association keeps this from N+1-ing across a page of courses.
+        if (c.getTutors() != null) {
+            c.getTutors().forEach(t -> {
+                if (t.getUser() != null) t.getUser().getFirstName();
+            });
+        }
     }
 
     /** Touch every lazy association the detail mapper reads. @BatchSize keeps it from N+1-ing. */
@@ -141,6 +152,9 @@ public class CourseService {
                 .status(CourseStatus.DRAFT)
                 .categories(resolveCategories(req.categoryIds()))
                 .tags(resolveTags(req.tagIds()))
+                // A tutor creating their own course starts as the sole roster entry and
+                // is the tutor authorised to edit it. Admins can widen the roster later.
+                .tutors(new HashSet<>(Set.of(tutor)))
                 .build();
         course.setId(UUID.randomUUID());
 
@@ -150,6 +164,107 @@ public class CourseService {
         // while the session is still open — the controller maps to DTO after this returns.
         initDetailGraph(saved);
         return saved;
+    }
+
+    /**
+     * Create a course on behalf of the university, assigning its tutors explicitly.
+     *
+     * <p>The tutor-facing {@link #createByTutor} derives the tutor from the caller,
+     * which cannot work here: a super admin has no tutor profile. The course belongs
+     * to the university either way — {@code tutor} only records who may edit it.
+     */
+    @Transactional
+    public Course createByAdmin(AdminCreateCourseRequest req) {
+        CreateCourseRequest c = req.course();
+        if (courses.existsBySlug(c.slug())) {
+            throw Errors.conflict("SLUG_ALREADY_EXISTS", "Course slug '" + c.slug() + "' is taken");
+        }
+        validateTypeSpecific(c.courseType(), c.onlineDetails(), c.offlineDetails());
+
+        Set<TutorProfile> roster = resolveTutors(req.tutorIds());
+        TutorProfile authorized = requireAuthorizedAmong(roster, req.authorizedTutorId());
+
+        Course course = Course.builder()
+                .tutor(authorized)
+                .slug(c.slug())
+                .title(c.title())
+                .subtitle(c.subtitle())
+                .description(c.description())
+                .requirements(c.requirements())
+                .learningOutcomes(c.learningOutcomes())
+                .syllabus(c.syllabus())
+                .courseType(c.courseType())
+                .level(c.level() == null ? com.eduplatform.eduplatform_backend.common.enums.CourseLevel.ALL : c.level())
+                .language(c.language() == null ? "en" : c.language())
+                .free(Boolean.TRUE.equals(c.free()))
+                .price(c.price())
+                .currency(c.currency())
+                .status(CourseStatus.DRAFT)
+                .categories(resolveCategories(c.categoryIds()))
+                .tags(resolveTags(c.tagIds()))
+                .tutors(roster)
+                .build();
+        course.setId(UUID.randomUUID());
+
+        attachTypeSpecific(course, c.courseType(), c.onlineDetails(), c.offlineDetails());
+        Course saved = courses.save(course);
+        audit.record(AuditService.Actions.CREATE, "COURSE", saved.getId(), null,
+                AuditService.snapshot(
+                        "createdBy", "ADMIN",
+                        "tutorCount", roster.size(),
+                        "authorizedTutorId", authorized.getId().toString()));
+        initDetailGraph(saved);
+        return saved;
+    }
+
+    /**
+     * Replace a course's teaching roster and nominate the tutor authorised to edit it.
+     * A full replacement, not a merge.
+     */
+    @Transactional
+    public Course setTutors(UUID courseId, SetCourseTutorsRequest req) {
+        Course course = get(courseId);
+        Set<TutorProfile> roster = resolveTutors(req.tutorIds());
+        TutorProfile authorized = requireAuthorizedAmong(roster, req.authorizedTutorId());
+        String previousAuthorizedId =
+                course.getTutor() == null ? null : course.getTutor().getId().toString();
+
+        course.setTutors(roster);
+        // Keep the two in step: the authorised editor must always be on the roster,
+        // otherwise a course could be editable by someone who no longer teaches it.
+        course.setTutor(authorized);
+
+        Course saved = courses.save(course);
+        audit.record(AuditService.Actions.UPDATE, "COURSE", courseId,
+                AuditService.snapshot("authorizedTutorId", previousAuthorizedId),
+                AuditService.snapshot(
+                        "tutorCount", roster.size(),
+                        "authorizedTutorId", authorized.getId().toString()));
+        initDetailGraph(saved);
+        return saved;
+    }
+
+    /** Loads every requested tutor, rejecting unknown or not-yet-approved ones. */
+    private Set<TutorProfile> resolveTutors(Set<UUID> tutorIds) {
+        Set<TutorProfile> resolved = new HashSet<>();
+        for (UUID id : tutorIds) {
+            TutorProfile t = tutors.findById(id).orElseThrow(() ->
+                    Errors.notFound("TUTOR_NOT_FOUND", "Tutor profile " + id + " does not exist"));
+            if (t.getApprovalStatus() != TutorApprovalStatus.APPROVED) {
+                throw Errors.unprocessable("TUTOR_NOT_APPROVED",
+                        "Tutor " + id + " is not approved and cannot be assigned to a course");
+            }
+            resolved.add(t);
+        }
+        return resolved;
+    }
+
+    private static TutorProfile requireAuthorizedAmong(Set<TutorProfile> roster, UUID authorizedTutorId) {
+        return roster.stream()
+                .filter(t -> t.getId().equals(authorizedTutorId))
+                .findFirst()
+                .orElseThrow(() -> Errors.unprocessable("AUTHORIZED_TUTOR_NOT_ON_ROSTER",
+                        "The authorised tutor must be one of the tutors assigned to the course"));
     }
 
     @Transactional

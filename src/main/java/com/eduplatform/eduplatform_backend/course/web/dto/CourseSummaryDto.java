@@ -6,6 +6,7 @@ import com.eduplatform.eduplatform_backend.common.enums.CourseType;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 /** Lightweight course card for catalog browsing. */
@@ -26,5 +27,7 @@ public record CourseSummaryDto(
         int enrolledCount,
         UUID tutorId,
         String tutorDisplayName,
+        /** Full teaching roster; tutorId above is the one authorised to edit. */
+        List<CourseTutorDto> tutors,
         Instant publishedAt
 ) {}
