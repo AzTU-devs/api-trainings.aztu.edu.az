@@ -16,8 +16,11 @@ RUN ./mvnw -q -B -DskipTests package \
 # ---------- runtime stage ----------
 FROM eclipse-temurin:17-jre-jammy
 
-# Run as a non-root user
-RUN groupadd --system app && useradd --system --gid app --create-home --home /home/app app
+# Run as a non-root user. UID/GID are pinned rather than auto-assigned so a host
+# directory bind-mounted for uploads can be chowned to a known owner — otherwise
+# the container writes as an unpredictable system UID and fails with EACCES.
+RUN groupadd --system --gid 1001 app \
+    && useradd --system --uid 1001 --gid 1001 --create-home --home /home/app app
 USER app
 WORKDIR /app
 
