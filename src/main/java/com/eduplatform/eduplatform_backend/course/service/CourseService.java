@@ -13,6 +13,7 @@ import com.eduplatform.eduplatform_backend.common.error.Errors;
 import com.eduplatform.eduplatform_backend.course.domain.Course;
 import com.eduplatform.eduplatform_backend.course.domain.OfflineCourseDetails;
 import com.eduplatform.eduplatform_backend.course.domain.OnlineCourseDetails;
+import com.eduplatform.eduplatform_backend.course.repo.CourseCatalogFilter;
 import com.eduplatform.eduplatform_backend.course.repo.CourseRepository;
 import com.eduplatform.eduplatform_backend.course.web.dto.AdminCreateCourseRequest;
 import com.eduplatform.eduplatform_backend.course.web.dto.CreateCourseRequest;
@@ -22,6 +23,7 @@ import com.eduplatform.eduplatform_backend.course.web.dto.SetCourseTutorsRequest
 import com.eduplatform.eduplatform_backend.course.web.dto.UpdateCourseRequest;
 import com.eduplatform.eduplatform_backend.tutor.domain.TutorProfile;
 import com.eduplatform.eduplatform_backend.tutor.repo.TutorProfileRepository;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -40,14 +42,17 @@ public class CourseService {
     private final CategoryRepository categories;
     private final TagRepository tags;
     private final AuditService audit;
+    private final boolean paymentsEnabled;
 
     public CourseService(CourseRepository courses, TutorProfileRepository tutors,
-                         CategoryRepository categories, TagRepository tags, AuditService audit) {
+                         CategoryRepository categories, TagRepository tags, AuditService audit,
+                         @Value("${app.payments.enabled:false}") boolean paymentsEnabled) {
         this.courses = courses;
         this.tutors = tutors;
         this.categories = categories;
         this.tags = tags;
         this.audit = audit;
+        this.paymentsEnabled = paymentsEnabled;
     }
 
     @Transactional(readOnly = true)
@@ -66,19 +71,33 @@ public class CourseService {
         return c;
     }
 
+    /** Public catalogue: every filter in {@code filter} is applied in SQL, not over the page. */
     @Transactional(readOnly = true)
-    public Page<Course> browsePublished(CourseType type, UUID categoryId, Pageable pageable) {
-        Page<Course> page = courses.browseCatalog(CourseStatus.PUBLISHED, type, categoryId, pageable);
+    public Page<Course> browsePublished(CourseCatalogFilter filter, Pageable pageable) {
+        // Free-only safety net. With no payment provider wired up, a paid course in the
+        // catalogue leads to a checkout that cannot charge anyone, so the catalogue hides
+        // them regardless of what the caller asked for. Forcing the filter here rather
+        // than dropping the price model keeps re-enabling paid courses a single
+        // app.payments.enabled flip.
+        CourseCatalogFilter effective = paymentsEnabled ? filter : filter.freeOnly();
+        Page<Course> page = courses.browseCatalog(CourseStatus.PUBLISHED, effective, pageable);
         page.forEach(CourseService::initSummaryGraph);
         return page;
     }
 
-    /** A tutor's own courses (drafts included), optionally filtered by status. */
+    /**
+     * A tutor's own courses (drafts included), optionally filtered by status and free text.
+     *
+     * <p>Both filters run in SQL across the whole result set, not over the fetched page — the
+     * portal previously searched only the rows already on screen.
+     */
     @Transactional(readOnly = true)
-    public Page<Course> listMine(UUID userId, CourseStatus status, Pageable pageable) {
-        Page<Course> page = status == null
-                ? courses.findAllByTutorUser(userId, pageable)
-                : courses.findAllByTutorUserAndStatus(userId, status, pageable);
+    public Page<Course> listMine(UUID userId, CourseStatus status, String query, Pageable pageable) {
+        // A cleared search box submits "", which must mean "no filter" and not "match the
+        // empty string" — the latter is harmless with LIKE but makes the null check below the
+        // only thing standing between a blank query and a full table scan per keystroke.
+        String q = (query == null || query.isBlank()) ? null : query.trim();
+        Page<Course> page = courses.searchTutorUserCourses(userId, status, q, pageable);
         page.forEach(CourseService::initSummaryGraph);
         return page;
     }
@@ -91,11 +110,10 @@ public class CourseService {
         return page;
     }
 
+    /** Search is the catalogue query with nothing but {@code q} set; kept for the admin portal. */
     @Transactional(readOnly = true)
     public Page<Course> search(String query, Pageable pageable) {
-        Page<Course> page = courses.search(query, pageable);
-        page.forEach(CourseService::initSummaryGraph);
-        return page;
+        return browsePublished(CourseCatalogFilter.byQuery(query), pageable);
     }
 
     /** Touch the lazy associations the summary mapper reads, before the session closes. */
@@ -112,6 +130,11 @@ public class CourseService {
                 if (t.getUser() != null) t.getUser().getFirstName();
             });
         }
+        // totalDurationSec on the card reads whichever detail row matches the course
+        // type; both are lazy inverse one-to-ones. The catalogue query fetch-joins them,
+        // but the tutor and moderation listings do not.
+        if (c.getOnlineDetails() != null) c.getOnlineDetails().getTotalVideoSeconds();
+        if (c.getOfflineDetails() != null) c.getOfflineDetails().getTotalHours();
     }
 
     /** Touch every lazy association the detail mapper reads. @BatchSize keeps it from N+1-ing. */

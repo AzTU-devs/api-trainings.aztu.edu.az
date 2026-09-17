@@ -18,7 +18,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 @Repository
-public interface CourseRepository extends JpaRepository<Course, UUID> {
+public interface CourseRepository extends JpaRepository<Course, UUID>, CourseCatalogRepository {
 
     Optional<Course> findBySlug(String slug);
 
@@ -28,56 +28,48 @@ public interface CourseRepository extends JpaRepository<Course, UUID> {
 
     Page<Course> findAllByCourseTypeAndStatus(CourseType courseType, CourseStatus status, Pageable pageable);
 
-    /** Public catalog browse with optional type + category filters. */
-    @Query("""
-           select c from Course c
-           where c.status = :status
-             and (:type is null or c.courseType = :type)
-             and (:categoryId is null or exists (select 1 from c.categories cat where cat.id = :categoryId))
-           order by c.publishedAt desc nulls last
-           """)
-    Page<Course> browseCatalog(@Param("status") CourseStatus status,
-                               @Param("type") CourseType type,
-                               @Param("categoryId") UUID categoryId,
-                               Pageable pageable);
-
     Page<Course> findAllByTutorId(UUID tutorId, Pageable pageable);
 
-    /** A tutor's own courses (all statuses), resolved by the owning user id. */
-    @Query("select c from Course c where c.tutor.user.id = :userId")
-    Page<Course> findAllByTutorUser(@Param("userId") UUID userId, Pageable pageable);
-
-    @Query("select c from Course c where c.tutor.user.id = :userId and c.status = :status")
-    Page<Course> findAllByTutorUserAndStatus(@Param("userId") UUID userId,
-                                             @Param("status") CourseStatus status,
-                                             Pageable pageable);
+    /**
+     * A tutor's own courses with optional status and free-text filters, both applied in SQL.
+     *
+     * <p>The portal's course list used to fetch one page and filter it by title in the
+     * browser, so a search only ever looked at the ten rows already on screen — a tutor with
+     * three pages of courses could not find one by name. This is the server-side counterpart.
+     *
+     * <p>ILIKE rather than the catalog's full-text index: this searches a single tutor's own
+     * courses including drafts, where the row count is small and substring matching on a
+     * partial title ("mach" finding "Machine Learning") is more useful than stemmed word
+     * matching. The public catalog keeps its GIN/tsvector path.
+     *
+     * <p>Ordering is fixed here rather than left to the caller's {@code Pageable}, because
+     * without a deterministic order Postgres may return a row on two different pages and omit
+     * another entirely. Callers pass page and size only.
+     *
+     * <p>{@code c.id} is the tiebreaker, and it is what actually makes the order
+     * deterministic: {@code createdAt} alone is not unique — seeded, bulk-imported or
+     * scripted courses routinely share a timestamp — and for ties Postgres is free to order
+     * the two differently between the page-0 and page-1 queries. One row then appears twice
+     * and another never appears. {@code CourseCatalogRepositoryImpl} appends the same
+     * tiebreaker for the same reason.
+     */
+    @Query("""
+           select c from Course c
+           where c.tutor.user.id = :userId
+             and (:status is null or c.status = :status)
+             and (:q is null or (
+                    lower(c.title) like lower(concat('%', :q, '%'))
+                 or lower(coalesce(c.subtitle, '')) like lower(concat('%', :q, '%'))
+                 or lower(c.slug) like lower(concat('%', :q, '%'))
+             ))
+           order by c.createdAt desc, c.id desc
+           """)
+    Page<Course> searchTutorUserCourses(@Param("userId") UUID userId,
+                                        @Param("status") CourseStatus status,
+                                        @Param("q") String q,
+                                        Pageable pageable);
 
     Page<Course> findAllByStatusOrderByCreatedAtDesc(CourseStatus status, Pageable pageable);
-
-    /** Full-text search over published courses; falls back to ILIKE when GIN cannot match. */
-    @Query(value = """
-           select * from courses c
-           where c.deleted_at is null
-             and c.status = 'PUBLISHED'
-             and (
-               to_tsvector('simple', c.title || ' ' || coalesce(c.subtitle,'') || ' ' || coalesce(c.description,''))
-                 @@ plainto_tsquery('simple', :q)
-               or c.title ilike concat('%', :q, '%')
-             )
-           order by c.published_at desc nulls last
-           """,
-           countQuery = """
-           select count(*) from courses c
-           where c.deleted_at is null
-             and c.status = 'PUBLISHED'
-             and (
-               to_tsvector('simple', c.title || ' ' || coalesce(c.subtitle,'') || ' ' || coalesce(c.description,''))
-                 @@ plainto_tsquery('simple', :q)
-               or c.title ilike concat('%', :q, '%')
-             )
-           """,
-           nativeQuery = true)
-    Page<Course> search(@Param("q") String query, Pageable pageable);
 
     long countByStatus(CourseStatus status);
 

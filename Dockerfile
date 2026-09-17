@@ -36,13 +36,16 @@ ENV JAVA_OPTS="-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -Djava.securit
 # keeps classpath:db/dev (seed ADMIN/SUPER_ADMIN accounts) off the Flyway path.
 ENV SPRING_PROFILES_ACTIVE=prod
 
-# Uploads when STORAGE_PROVIDER=LOCAL. Mount a volume here, or use S3 in prod —
-# container-local writes are lost on redeploy.
-ENV STORAGE_LOCAL_DIR=/var/uploads
+# Uploads. LOCAL is the only implemented storage provider, so this directory IS the
+# media store and a host volume must be mounted on it — anything written to the
+# container's own layer is gone on the next redeploy. /opt/uploads is the one path the
+# image default, the VOLUME and both compose mounts agree on; changing it in only one
+# place is how uploads silently disappear.
+ENV STORAGE_LOCAL_DIR=/opt/uploads
 USER root
-RUN mkdir -p /var/uploads && chown app:app /var/uploads
+RUN mkdir -p /opt/uploads && chown app:app /opt/uploads
 USER app
-VOLUME ["/var/uploads"]
+VOLUME ["/opt/uploads"]
 
 EXPOSE 8080
 

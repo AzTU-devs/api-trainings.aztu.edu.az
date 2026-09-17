@@ -32,7 +32,7 @@ public class OrderController {
 
     @PostMapping
     @PreAuthorize("hasAuthority('payment:checkout')")
-    @Operation(summary = "Create a pending order; payment provider integration follows in Phase 8+")
+    @Operation(summary = "Create a pending order; refused with 503 PAYMENTS_DISABLED while no payment provider is integrated")
     public ResponseEntity<ApiResponse<OrderDto>> create(@Valid @RequestBody OrderCreateRequest req,
                                                         @CurrentUser AuthenticatedPrincipal me) {
         return ResponseEntity.status(HttpStatus.CREATED)

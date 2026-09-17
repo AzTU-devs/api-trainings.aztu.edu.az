@@ -2,6 +2,7 @@ package com.eduplatform.eduplatform_backend.payment.service;
 
 import com.eduplatform.eduplatform_backend.common.enums.OrderItemType;
 import com.eduplatform.eduplatform_backend.common.enums.OrderStatus;
+import com.eduplatform.eduplatform_backend.common.error.AppException;
 import com.eduplatform.eduplatform_backend.common.error.Errors;
 import com.eduplatform.eduplatform_backend.course.domain.Course;
 import com.eduplatform.eduplatform_backend.course.repo.CourseRepository;
@@ -13,8 +14,10 @@ import com.eduplatform.eduplatform_backend.payment.repo.OrderRepository;
 import com.eduplatform.eduplatform_backend.payment.web.dto.OrderCreateRequest;
 import com.eduplatform.eduplatform_backend.room.domain.RoomBooking;
 import com.eduplatform.eduplatform_backend.room.repo.RoomBookingRepository;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -22,6 +25,22 @@ import java.math.BigDecimal;
 import java.security.SecureRandom;
 import java.util.UUID;
 
+/**
+ * Order lifecycle. <strong>No payment provider is integrated anywhere in this project.</strong>
+ * Nothing in the codebase ever assigns {@link OrderStatus#PAID} and there is no webhook endpoint,
+ * so an order created here can only ever sit at {@code PENDING}; the single working enrollment
+ * route is the free one in {@code EnrollmentService}. Creation is therefore gated behind
+ * {@code app.payments.enabled} (default {@code false}) instead of returning a 201 that lets a
+ * student believe they bought something. The gate sits on the service rather than the controller
+ * so that every future caller (admin tooling, batch imports, a cart flow) is refused by the same
+ * rule, and it is a flag rather than a deletion so re-enabling is one environment variable.
+ *
+ * <p>A real integration has to add three things: a charge call against the provider during
+ * {@link #create}, a signed webhook endpoint that flips the order to {@code PAID} and appends a
+ * {@link com.eduplatform.eduplatform_backend.payment.domain.PaymentEvent} audit row, and
+ * enrollment-on-paid mirroring the free route. The entities, repositories, DTOs and mappers in
+ * this package are already shaped for that — only the provider glue is missing.
+ */
 @Service
 public class OrderService {
 
@@ -31,17 +50,26 @@ public class OrderService {
     private final CourseRepository courses;
     private final RoomBookingRepository bookings;
     private final UserRepository users;
+    private final boolean paymentsEnabled;
 
     public OrderService(OrderRepository orders, CourseRepository courses,
-                        RoomBookingRepository bookings, UserRepository users) {
+                        RoomBookingRepository bookings, UserRepository users,
+                        @Value("${app.payments.enabled:false}") boolean paymentsEnabled) {
         this.orders = orders;
         this.courses = courses;
         this.bookings = bookings;
         this.users = users;
+        this.paymentsEnabled = paymentsEnabled;
     }
 
     @Transactional
     public Order create(UUID userId, OrderCreateRequest req) {
+        if (!paymentsEnabled) {
+            // 503, not 400/409: the request is well formed, the capability is absent. Thrown
+            // directly because Errors has no service-unavailable family.
+            throw new AppException(HttpStatus.SERVICE_UNAVAILABLE, "PAYMENTS_DISABLED",
+                    "Online payment is not available yet; only free courses can be enrolled in at the moment.");
+        }
         if (req.items() == null || req.items().isEmpty()) {
             throw Errors.badRequest("EMPTY_ORDER", "Order must contain at least one item");
         }

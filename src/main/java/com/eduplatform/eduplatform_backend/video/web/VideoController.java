@@ -53,11 +53,16 @@ public class VideoController {
     }
 
     @PutMapping("/{id}/content")
-    @Operation(summary = "Upload the raw video bytes for a started upload")
+    @Operation(summary = "Upload the raw video bytes for a started upload",
+            description = "The body must be one of MP4, WebM or QuickTime and is refused past the "
+                    + "configured video size limit, mid-stream if necessary.")
     public ResponseEntity<Void> upload(@PathVariable UUID id,
                                        @CurrentUser AuthenticatedPrincipal me,
                                        HttpServletRequest request) throws IOException {
-        service.storeBytes(me.userId(), id, request.getInputStream(), request.getContentType());
+        // getContentLengthLong() is -1 on a chunked upload; the service treats that as "unknown"
+        // and relies on the cap the storage layer applies while the bytes arrive.
+        service.storeBytes(me.userId(), id, request.getInputStream(), request.getContentType(),
+                request.getContentLengthLong());
         return ResponseEntity.noContent().build();
     }
 

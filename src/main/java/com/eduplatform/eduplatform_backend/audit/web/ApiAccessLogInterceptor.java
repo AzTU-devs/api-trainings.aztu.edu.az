@@ -58,6 +58,17 @@ public class ApiAccessLogInterceptor implements HandlerInterceptor {
         if (path == null || !path.startsWith("/api/")) return;
         if (path.startsWith("/api/super/api-logs")) return; // don't log reads of the log view itself
 
+        // Public media is anonymous, unauthenticated and fetched as a page subresource, so it
+        // is the highest-volume route here by a wide margin: one ordinary 12-card catalogue
+        // page is 12 requests from a single cold visitor. Since ApiLogService.record writes
+        // synchronously on the request thread, logging it would turn a static thumbnail fetch
+        // into a database INSERT — an unauthenticated write-amplification vector, and one the
+        // auth rate limiter does not cover because it only guards /api/auth/.
+        //
+        // Nothing is lost by skipping it: these are cacheable public bytes, and access
+        // patterns for them belong in the web server's access log, not the audit trail.
+        if (path.startsWith("/api/public/media/")) return;
+
         Object start = request.getAttribute(START_ATTR);
         long latencyMs = start instanceof Long s ? (System.nanoTime() - s) / 1_000_000 : 0;
         AuthenticatedPrincipal me = currentPrincipal();

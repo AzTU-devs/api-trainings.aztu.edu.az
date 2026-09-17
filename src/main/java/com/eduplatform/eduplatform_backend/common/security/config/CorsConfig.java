@@ -28,7 +28,10 @@ public class CorsConfig {
         cfg.setAllowedOriginPatterns(props.allowedOrigins() == null ? List.of() : props.allowedOrigins());
         cfg.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         cfg.setAllowedHeaders(List.of("*"));
-        cfg.setExposedHeaders(List.of("Authorization", "X-Request-Id"));
+        // Retry-After is exposed because the auth rate limiter sends it with every 429, and a
+        // cross-origin caller cannot read a response header that is not listed here — the
+        // login form would know it was throttled but not for how long.
+        cfg.setExposedHeaders(List.of("Authorization", "X-Request-Id", "Retry-After"));
         cfg.setAllowCredentials(true);
         cfg.setMaxAge(3600L);
 

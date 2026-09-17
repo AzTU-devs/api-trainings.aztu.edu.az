@@ -2,19 +2,20 @@ package com.eduplatform.eduplatform_backend.media.storage;
 
 import com.eduplatform.eduplatform_backend.common.enums.MediaStorage;
 import com.eduplatform.eduplatform_backend.common.error.Errors;
+import com.eduplatform.eduplatform_backend.media.upload.UploadErrors;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.UrlResource;
 import org.springframework.stereotype.Service;
-import org.springframework.util.StringUtils;
-import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.security.DigestInputStream;
+import java.nio.file.StandardOpenOption;
+import java.security.DigestOutputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
@@ -28,73 +29,50 @@ import java.util.UUID;
 @Service
 public class LocalStorageService implements StorageService {
 
+    private static final int COPY_BUFFER_BYTES = 64 * 1024;
+
     private final Path baseDir;
 
-    public LocalStorageService(@Value("${app.storage.local.base-dir:./var/uploads}") String baseDir) {
+    public LocalStorageService(@Value("${app.storage.local.base-dir:/opt/uploads}") String baseDir) {
         this.baseDir = Path.of(baseDir).toAbsolutePath().normalize();
     }
 
     @Override
-    public Stored store(MultipartFile file) {
-        if (file == null || file.isEmpty()) {
-            throw Errors.badRequest("EMPTY_FILE", "Uploaded file is empty");
+    public Stored store(InputStream in, String extension, long maxBytes) {
+        if (in == null) {
+            throw Errors.badRequest("EMPTY_FILE", "No content to store");
         }
-        String ext = extensionOf(file.getOriginalFilename());
-        String id = UUID.randomUUID().toString();
-        // Shard by the first two hex chars to keep directories small.
-        String objectKey = id.substring(0, 2) + "/" + id + ext;
+        String objectKey = newObjectKey(extension);
         Path target = resolve(objectKey);
-
+        boolean kept = false;
         try {
             Files.createDirectories(target.getParent());
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            long size;
-            try (InputStream in = file.getInputStream();
-                 DigestInputStream dis = new DigestInputStream(in, digest)) {
-                size = Files.copy(dis, target, StandardCopyOption.REPLACE_EXISTING);
+            long size = copyCapped(in, target, digest, maxBytes);
+            if (size == 0) {
+                throw Errors.badRequest("EMPTY_FILE", "Uploaded file is empty");
             }
-            String sha256 = HexFormat.of().formatHex(digest.digest());
-            return new Stored(objectKey, sha256, size);
+            kept = true;
+            return new Stored(objectKey, HexFormat.of().formatHex(digest.digest()), size);
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 unavailable", e);
         } catch (IOException e) {
             throw Errors.unprocessable("STORAGE_WRITE_FAILED", "Could not store uploaded file");
-        }
-    }
-
-    @Override
-    public Stored store(InputStream in, String originalFilename) {
-        if (in == null) {
-            throw Errors.badRequest("EMPTY_FILE", "No content to store");
-        }
-        String ext = extensionOf(originalFilename);
-        String id = UUID.randomUUID().toString();
-        String objectKey = id.substring(0, 2) + "/" + id + ext;
-        Path target = resolve(objectKey);
-        try {
-            Files.createDirectories(target.getParent());
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            long size;
-            try (DigestInputStream dis = new DigestInputStream(in, digest)) {
-                size = Files.copy(dis, target, StandardCopyOption.REPLACE_EXISTING);
+        } finally {
+            // No media row references this key yet, so a partial write left behind by a rejected
+            // upload (over the cap, empty, client hung up) would never be collected by anything.
+            if (!kept) {
+                delete(objectKey);
             }
-            if (size == 0) {
-                Files.deleteIfExists(target);
-                throw Errors.badRequest("EMPTY_FILE", "Uploaded stream was empty");
-            }
-            String sha256 = HexFormat.of().formatHex(digest.digest());
-            return new Stored(objectKey, sha256, size);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 unavailable", e);
-        } catch (IOException e) {
-            throw Errors.unprocessable("STORAGE_WRITE_FAILED", "Could not store uploaded stream");
         }
     }
 
     @Override
     public Resource load(String objectKey) {
         Path path = resolve(objectKey);
-        if (!Files.exists(path)) {
+        // NOFOLLOW_LINKS: a symlink under the base dir would otherwise be a way to read any file
+        // the service user can reach, which is exactly what the traversal guard exists to prevent.
+        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
             throw Errors.notFound("MEDIA_NOT_FOUND", "Stored object no longer exists");
         }
         try {
@@ -118,17 +96,48 @@ public class LocalStorageService implements StorageService {
         return MediaStorage.LOCAL;
     }
 
+    /**
+     * Stream to disk while hashing, refusing to write more than {@code maxBytes}. The cap is
+     * applied as the bytes arrive because a declared body length is absent on a chunked upload and
+     * untrustworthy otherwise; the alternative is writing the whole file before measuring it.
+     */
+    private static long copyCapped(InputStream in, Path target, MessageDigest digest, long maxBytes)
+            throws IOException {
+        long total = 0;
+        byte[] buffer = new byte[COPY_BUFFER_BYTES];
+        try (OutputStream file = Files.newOutputStream(target, StandardOpenOption.CREATE,
+                     StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
+             DigestOutputStream out = new DigestOutputStream(file, digest)) {
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                total += read;
+                if (maxBytes > 0 && total > maxBytes) {
+                    throw UploadErrors.tooLarge(maxBytes);
+                }
+                out.write(buffer, 0, read);
+            }
+        }
+        return total;
+    }
+
+    /** Opaque, sharded key. The extension comes from the validated type, never the client. */
+    private static String newObjectKey(String extension) {
+        String id = UUID.randomUUID().toString();
+        // Shard by the first two hex chars to keep directories small.
+        return id.substring(0, 2) + "/" + id + (extension == null ? "" : extension);
+    }
+
     /** Resolve an object key under the base dir, guarding against path traversal. */
     private Path resolve(String objectKey) {
+        if (objectKey == null || objectKey.isBlank()) {
+            throw Errors.badRequest("INVALID_OBJECT_KEY", "Illegal storage path");
+        }
         Path path = baseDir.resolve(objectKey).normalize();
-        if (!path.startsWith(baseDir)) {
+        // startsWith compares whole path elements, so a sibling directory whose name merely begins
+        // with the base dir's name ("/opt/uploads-evil") does not pass either.
+        if (!path.startsWith(baseDir) || path.equals(baseDir)) {
             throw Errors.badRequest("INVALID_OBJECT_KEY", "Illegal storage path");
         }
         return path;
-    }
-
-    private static String extensionOf(String filename) {
-        String ext = StringUtils.getFilenameExtension(filename);
-        return (ext == null || ext.isBlank()) ? "" : "." + ext.toLowerCase();
     }
 }

@@ -20,6 +20,10 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+// MaxUploadSizeExceededException extends MultipartException; Spring dispatches to the most
+// specific @ExceptionHandler, so the size-specific message wins over the generic one.
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.MultipartException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.List;
@@ -116,6 +120,41 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiError> handleNoResource(NoResourceFoundException ex, HttpServletRequest req) {
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
                 ApiError.of(404, "NOT_FOUND", "Resource not found", req.getRequestURI()));
+    }
+
+    /**
+     * A multipart body larger than {@code spring.servlet.multipart.max-file-size} is rejected
+     * by the servlet container before any controller runs, so the per-kind checks in
+     * {@code MediaService} never get a chance to produce their own message. Without this
+     * handler it reaches {@link #handleAny} and an ordinary too-big file becomes a 500 plus an
+     * ERROR log line — indistinguishable from a real fault, and the uploader is told nothing
+     * it can act on.
+     *
+     * <p>413 rather than 400: the request was well formed, it was simply too large. The
+     * message deliberately does not name the servlet ceiling, because it is not the limit
+     * that usually applies — {@code app.uploads.max-image-mb} / {@code max-video-mb} /
+     * {@code max-document-mb} are lower and are what the client is really bound by.
+     */
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public ResponseEntity<ApiError> handleTooLarge(MaxUploadSizeExceededException ex, HttpServletRequest req) {
+        log.debug("Rejected an upload that exceeded the servlet multipart limit", ex);
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(
+                ApiError.of(413, "UPLOAD_TOO_LARGE",
+                        "The uploaded file is larger than this endpoint accepts", req.getRequestURI()));
+    }
+
+    /**
+     * Anything else malformed about a multipart request — a truncated body from a dropped
+     * connection mid-upload is the common one. Also a 4xx, for the same reason as above: it
+     * is the client's request that was broken, and letting it log at ERROR buries real
+     * failures behind routine flaky uploads.
+     */
+    @ExceptionHandler(MultipartException.class)
+    public ResponseEntity<ApiError> handleMultipart(MultipartException ex, HttpServletRequest req) {
+        log.debug("Malformed multipart request", ex);
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(
+                ApiError.of(400, "MALFORMED_UPLOAD",
+                        "The upload request was malformed or ended early", req.getRequestURI()));
     }
 
     @ExceptionHandler(Exception.class)

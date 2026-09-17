@@ -4,6 +4,7 @@ import com.eduplatform.eduplatform_backend.common.security.RestAccessDeniedHandl
 import com.eduplatform.eduplatform_backend.common.security.RestAuthEntryPoint;
 import com.eduplatform.eduplatform_backend.common.security.filter.JwtAuthFilter;
 import com.eduplatform.eduplatform_backend.common.security.oauth.OAuth2LoginSuccessHandler;
+import com.eduplatform.eduplatform_backend.common.security.ratelimit.AuthRateLimitFilter;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -29,6 +30,7 @@ public class SecurityConfig {
             HttpSecurity http,
             CorsConfigurationSource cors,
             JwtAuthFilter jwtAuthFilter,
+            AuthRateLimitFilter rateLimitFilter,
             RestAuthEntryPoint authEntryPoint,
             RestAccessDeniedHandler accessDeniedHandler,
             ObjectProvider<ClientRegistrationRepository> clientRegProvider,
@@ -72,7 +74,10 @@ public class SecurityConfig {
                     .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                     // Everything else needs a JWT
                     .anyRequest().authenticated())
-            .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+            .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+            // Ahead of the JWT filter, so a throttled auth request is rejected before any
+            // credential is checked and therefore cannot spend a victim's failed-login budget.
+            .addFilterBefore(rateLimitFilter, JwtAuthFilter.class);
 
         // OAuth2 login (Google/Facebook) is wired only when client credentials are configured.
         // Apple uses a separate custom controller at /api/auth/oauth/apple/**.

@@ -1,5 +1,6 @@
 package com.eduplatform.eduplatform_backend.identity.web;
 
+import com.eduplatform.eduplatform_backend.common.error.Errors;
 import com.eduplatform.eduplatform_backend.common.security.AuthenticatedPrincipal;
 import com.eduplatform.eduplatform_backend.common.security.CurrentUser;
 import com.eduplatform.eduplatform_backend.common.web.ApiResponse;
@@ -22,6 +23,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -36,13 +38,16 @@ public class AuthController {
     private final AdminSignupService adminSignup;
     private final TutorSignupService tutorSignup;
     private final com.eduplatform.eduplatform_backend.identity.service.AccountRecoveryService recovery;
+    private final RefreshTokenCookie refreshCookie;
 
     public AuthController(AuthService auth, AdminSignupService adminSignup, TutorSignupService tutorSignup,
-                          com.eduplatform.eduplatform_backend.identity.service.AccountRecoveryService recovery) {
+                          com.eduplatform.eduplatform_backend.identity.service.AccountRecoveryService recovery,
+                          RefreshTokenCookie refreshCookie) {
         this.auth = auth;
         this.adminSignup = adminSignup;
         this.tutorSignup = tutorSignup;
         this.recovery = recovery;
+        this.refreshCookie = refreshCookie;
     }
 
     @PostMapping("/password/forgot")
@@ -80,8 +85,11 @@ public class AuthController {
     @PostMapping("/register")
     @Operation(summary = "Register a new end-user account", security = {})
     public ResponseEntity<ApiResponse<AuthTokens>> register(@Valid @RequestBody RegisterRequest req,
-                                                            HttpServletRequest http) {
-        return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.ok(auth.register(req, http)));
+                                                            HttpServletRequest http,
+                                                            HttpServletResponse response) {
+        AuthTokens tokens = auth.register(req, http);
+        refreshCookie.issue(response, tokens.refreshToken());
+        return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.ok(tokens));
     }
 
     @PostMapping("/register/tutor/start")
@@ -108,20 +116,37 @@ public class AuthController {
 
     @PostMapping("/login")
     @Operation(summary = "Authenticate with email + password", security = {})
-    public ApiResponse<AuthTokens> login(@Valid @RequestBody LoginRequest req, HttpServletRequest http) {
-        return ApiResponse.ok(auth.login(req, http));
+    public ApiResponse<AuthTokens> login(@Valid @RequestBody LoginRequest req, HttpServletRequest http,
+                                         HttpServletResponse response) {
+        AuthTokens tokens = auth.login(req, http);
+        refreshCookie.issue(response, tokens.refreshToken());
+        return ApiResponse.ok(tokens);
     }
 
     @PostMapping("/refresh")
-    @Operation(summary = "Rotate the refresh token and obtain a new access token", security = {})
-    public ApiResponse<AuthTokens> refresh(@Valid @RequestBody RefreshRequest req, HttpServletRequest http) {
-        return ApiResponse.ok(auth.refresh(req.refreshToken(), http));
+    @Operation(
+            summary = "Rotate the refresh token and obtain a new access token",
+            description = "Takes the token from the request body, or from the " + RefreshTokenCookie.NAME +
+                    " cookie when the body omits it. The rotated token is always returned in the body too.",
+            security = {})
+    public ApiResponse<AuthTokens> refresh(@RequestBody(required = false) RefreshRequest req,
+                                           HttpServletRequest http, HttpServletResponse response) {
+        AuthTokens tokens = auth.refresh(resolveRefreshToken(req, http), http);
+        refreshCookie.issue(response, tokens.refreshToken());
+        return ApiResponse.ok(tokens);
     }
 
     @PostMapping("/logout")
-    @Operation(summary = "Revoke the supplied refresh token", security = @SecurityRequirement(name = "bearerAuth"))
-    public ResponseEntity<Void> logout(@Valid @RequestBody RefreshRequest req) {
-        auth.logout(req.refreshToken());
+    @Operation(summary = "Revoke the refresh token (request body or cookie) and clear the cookie",
+            security = @SecurityRequirement(name = "bearerAuth"))
+    public ResponseEntity<Void> logout(@RequestBody(required = false) RefreshRequest req,
+                                       HttpServletRequest http, HttpServletResponse response) {
+        // Cleared unconditionally: signing out must leave nothing in the jar even when the token is
+        // already expired, already revoked or simply absent, so logout stays idempotent (204).
+        refreshCookie.clear(response);
+        String token = bodyToken(req);
+        if (token == null) token = refreshCookie.read(http);
+        if (token != null) auth.logout(token);
         return ResponseEntity.noContent().build();
     }
 
@@ -165,8 +190,34 @@ public class AuthController {
             security = {})
     public ResponseEntity<ApiResponse<AuthTokens>> adminVerify(
             @Valid @RequestBody AdminRegisterVerifyRequest req,
-            HttpServletRequest http) {
-        return ResponseEntity.status(HttpStatus.CREATED)
-                .body(ApiResponse.ok(adminSignup.verify(req, http)));
+            HttpServletRequest http,
+            HttpServletResponse response) {
+        AuthTokens tokens = adminSignup.verify(req, http);
+        refreshCookie.issue(response, tokens.refreshToken());
+        return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.ok(tokens));
+    }
+
+    // ---------------------------------------------------------------------
+    // Refresh-token plumbing shared by /refresh and /logout.
+    // ---------------------------------------------------------------------
+
+    /**
+     * Body first, cookie second. The public site's BFF holds the token server-side and posts it
+     * explicitly; the admin portal posts nothing and relies on the httpOnly cookie, so neither
+     * client had to change shape for the other's sake.
+     */
+    private String resolveRefreshToken(RefreshRequest req, HttpServletRequest http) {
+        String token = bodyToken(req);
+        if (token == null) token = refreshCookie.read(http);
+        if (token == null) {
+            throw Errors.unauthorized("REFRESH_TOKEN_MISSING",
+                    "No refresh token in the request body or session cookie");
+        }
+        return token;
+    }
+
+    private static String bodyToken(RefreshRequest req) {
+        if (req == null || req.refreshToken() == null || req.refreshToken().isBlank()) return null;
+        return req.refreshToken();
     }
 }

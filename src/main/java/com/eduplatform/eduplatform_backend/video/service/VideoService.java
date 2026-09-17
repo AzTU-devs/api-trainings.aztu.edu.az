@@ -6,6 +6,9 @@ import com.eduplatform.eduplatform_backend.common.error.Errors;
 import com.eduplatform.eduplatform_backend.media.domain.MediaFile;
 import com.eduplatform.eduplatform_backend.media.repo.MediaFileRepository;
 import com.eduplatform.eduplatform_backend.media.storage.StorageService;
+import com.eduplatform.eduplatform_backend.media.upload.AllowedMediaType;
+import com.eduplatform.eduplatform_backend.media.upload.UploadKind;
+import com.eduplatform.eduplatform_backend.media.upload.UploadPolicy;
 import com.eduplatform.eduplatform_backend.video.web.dto.VideoAssetDto;
 import com.eduplatform.eduplatform_backend.video.web.dto.VideoCompleteRequest;
 import com.eduplatform.eduplatform_backend.video.web.dto.VideoInitRequest;
@@ -15,7 +18,10 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.io.InputStream;
+import java.io.SequenceInputStream;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -27,27 +33,39 @@ import java.util.UUID;
 @Service
 public class VideoService {
 
+    /** Filenames are display metadata only; a longer one is junk, not a name. */
+    private static final int MAX_FILENAME_LENGTH = 255;
+
     private final MediaFileRepository media;
     private final StorageService storage;
+    private final UploadPolicy policy;
 
-    public VideoService(MediaFileRepository media, StorageService storage) {
+    public VideoService(MediaFileRepository media, StorageService storage, UploadPolicy policy) {
         this.media = media;
         this.storage = storage;
+        this.policy = policy;
     }
 
     @Transactional
     public VideoInitResponse init(UUID ownerId, VideoInitRequest req) {
+        // Both checks fail the client before it spends minutes uploading: the browser already
+        // knows the file's size and type, so an oversized or non-video file is refused here
+        // rather than after half a gigabyte has crossed the wire.
+        AllowedMediaType declared = policy.declaredVideoType(req.mime());
+        policy.requireWithinLimit(UploadKind.VIDEO, req.sizeBytes());
+
+        String filename = cleanDisplayName(req.filename());
         Map<String, Object> meta = new HashMap<>();
         meta.put("kind", "video");
-        meta.put("filename", req.filename());
-        meta.put("title", stripExtension(req.filename()));
+        meta.put("filename", filename);
+        meta.put("title", stripExtension(filename));
 
         UUID id = UUID.randomUUID();
         MediaFile m = MediaFile.builder()
                 .ownerUserId(ownerId)
                 .storage(storage.type())
                 .objectKey("pending/" + id)            // replaced once bytes arrive
-                .mimeType(normalizeMime(req.mime()))
+                .mimeType(declared.mime())
                 .byteSize(Math.max(0, req.sizeBytes()))
                 .status(MediaStatus.PENDING)
                 .visibility(MediaVisibility.PRIVATE)
@@ -59,18 +77,38 @@ public class VideoService {
     }
 
     @Transactional
-    public void storeBytes(UUID ownerId, UUID videoId, InputStream body, String contentType) {
+    public void storeBytes(UUID ownerId, UUID videoId, InputStream body, String contentType, long declaredLength) {
         MediaFile m = requireOwned(ownerId, videoId);
-        String filename = m.getMetadata() == null ? null : String.valueOf(m.getMetadata().get("filename"));
-        StorageService.Stored stored = storage.store(body, filename);
+        policy.requireWithinLimit(UploadKind.VIDEO, declaredLength);
+
+        AllowedMediaType type;
+        StorageService.Stored stored;
+        // The PUT may re-declare the type; fall back to what /init recorded. Either way the
+        // leading bytes have to prove it really is one of the allowed video containers, and the
+        // cap is enforced as they stream — a lying Content-Length buys nothing.
+        String declared = (contentType == null || contentType.isBlank()) ? m.getMimeType() : contentType;
+        try {
+            byte[] head = body.readNBytes(UploadPolicy.SNIFF_BYTES);
+            type = policy.validateVideo(declared, head, declaredLength);
+            stored = storage.store(new SequenceInputStream(new ByteArrayInputStream(head), body),
+                    type.extension(), policy.maxBytes(UploadKind.VIDEO));
+        } catch (IOException e) {
+            throw Errors.unprocessable("UPLOAD_READ_FAILED", "Could not read the uploaded video stream");
+        }
+
+        String previousKey = m.getObjectKey();
         m.setObjectKey(stored.objectKey());
         m.setByteSize(stored.size());
         m.setChecksumSha256(stored.sha256());
-        if (contentType != null && contentType.startsWith("video/")) {
-            m.setMimeType(contentType);
-        }
+        m.setMimeType(type.mime());
         m.setStatus(MediaStatus.PROCESSING);
         media.save(m);
+
+        // Re-PUTting bytes for the same video would otherwise strand the first object on disk
+        // with nothing referencing it.
+        if (previousKey != null && !previousKey.startsWith("pending/")) {
+            storage.delete(previousKey);
+        }
     }
 
     @Transactional
@@ -80,7 +118,7 @@ public class VideoService {
             throw Errors.conflict("VIDEO_NOT_UPLOADED", "Upload the video bytes before completing");
         }
         if (req != null && req.title() != null && !req.title().isBlank()) {
-            ensureMetadata(m).put("title", req.title().trim());
+            ensureMetadata(m).put("title", cleanDisplayName(req.title()));
         }
         m.setStatus(MediaStatus.READY);
         media.save(m);
@@ -149,8 +187,22 @@ public class VideoService {
         };
     }
 
-    private static String normalizeMime(String mime) {
-        return (mime == null || mime.isBlank()) ? "video/mp4" : mime;
+    /**
+     * Keep the tutor's own wording (including non-Latin titles) but drop control characters and
+     * any path the browser may have prefixed: this value is echoed back to the dashboard and is
+     * the basis of the download filename, which is a header.
+     */
+    private static String cleanDisplayName(String text) {
+        if (text == null || text.isBlank()) {
+            return "Untitled video";
+        }
+        String base = text.replace('\\', '/');
+        base = base.substring(base.lastIndexOf('/') + 1);
+        String cleaned = base.replaceAll("\\p{Cntrl}", "").trim();
+        if (cleaned.isBlank()) {
+            return "Untitled video";
+        }
+        return cleaned.length() > MAX_FILENAME_LENGTH ? cleaned.substring(0, MAX_FILENAME_LENGTH) : cleaned;
     }
 
     private static String stripExtension(String filename) {

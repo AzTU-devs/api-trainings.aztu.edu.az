@@ -61,11 +61,16 @@ services:
       JWT_ACCESS_TTL_MIN:   ${JWT_ACCESS_TTL_MIN:-15}
       JWT_REFRESH_TTL_DAYS: ${JWT_REFRESH_TTL_DAYS:-30}
 
-      # Mail
+      # Mail — off by default locally, so OTP / verification / reset messages are
+      # logged instead of sent. Also keeps the SMTP health indicator disabled, which
+      # would otherwise report DOWN on blank credentials and stop the container from
+      # ever becoming healthy.
+      MAIL_ENABLED:  ${MAIL_ENABLED:-false}
       MAIL_HOST:     ${MAIL_HOST:-}
       MAIL_PORT:     ${MAIL_PORT:-587}
       MAIL_USERNAME: ${MAIL_USERNAME:-}
       MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      MAIL_FROM:     ${MAIL_FROM:-no-reply@eduplatform.local}
 
       # OAuth — leave blank to disable each provider
       OAUTH_GOOGLE_CLIENT_ID:     ${OAUTH_GOOGLE_CLIENT_ID:-}
@@ -77,18 +82,31 @@ services:
       APPLE_KEY_ID:               ${APPLE_KEY_ID:-}
       APPLE_PRIVATE_KEY_PEM:      ${APPLE_PRIVATE_KEY_PEM:-}
 
-      # Storage
-      STORAGE_PROVIDER:   ${STORAGE_PROVIDER:-LOCAL}
-      STORAGE_LOCAL_DIR:  /var/uploads
-      S3_BUCKET:          ${S3_BUCKET:-}
-      S3_REGION:          ${S3_REGION:-}
-      S3_ACCESS_KEY:      ${S3_ACCESS_KEY:-}
-      S3_SECRET_KEY:      ${S3_SECRET_KEY:-}
+      # Storage — LOCAL is the only implemented provider. The path is hardcoded
+      # rather than taken from .env because it has to match the volume mount below.
+      STORAGE_PROVIDER:   LOCAL
+      STORAGE_LOCAL_DIR:  /opt/uploads
+
+      # Upload ceilings (MB). Must stay in step with the admin portal's nginx
+      # client_max_body_size and its VITE_UPLOAD_MAX_* values.
+      UPLOAD_MAX_IMAGE_MB:    ${UPLOAD_MAX_IMAGE_MB:-10}
+      UPLOAD_MAX_VIDEO_MB:    ${UPLOAD_MAX_VIDEO_MB:-512}
+      UPLOAD_MAX_DOCUMENT_MB: ${UPLOAD_MAX_DOCUMENT_MB:-25}
+
+      # Free-only mode: no payment provider is integrated, so order creation is
+      # refused and the public catalogue lists FREE courses only.
+      PAYMENTS_ENABLED:  ${PAYMENTS_ENABLED:-false}
+      # Per-IP buckets on the unauthenticated auth endpoints. Off only for load tests.
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
 
     volumes:
-      - eduplatform-uploads:/var/uploads
+      - eduplatform-uploads:/opt/uploads
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/actuator/health"]
+      # Readiness, like the image's own HEALTHCHECK and the prod stack: the aggregate
+      # /actuator/health includes the SMTP indicator, so a developer who turns mail on
+      # with the wrong credentials would get a container that never reports healthy.
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider",
+             "http://localhost:8080/actuator/health/readiness"]
       interval: 30s
       timeout: 5s
       retries: 5

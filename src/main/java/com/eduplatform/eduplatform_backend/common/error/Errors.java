@@ -30,4 +30,8 @@ public final class Errors {
     public static AppException unprocessable(String code, String message) {
         return new AppException(HttpStatus.UNPROCESSABLE_ENTITY, code, message);
     }
+
+    public static AppException tooManyRequests(String code, String message) {
+        return new AppException(HttpStatus.TOO_MANY_REQUESTS, code, message);
+    }
 }

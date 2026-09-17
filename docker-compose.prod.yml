@@ -36,11 +36,15 @@ services:
       - .env
 
     volumes:
-      # Must match STORAGE_LOCAL_DIR in .env. Kept outside the repo so a
-      # redeploy or fresh clone cannot delete uploaded files.
-      # The host directory must be owned by 1001:1001 (the image's app user):
-      #   sudo chown -R 1001:1001 /opt/trainings/uploads
-      - /opt/trainings/uploads:/opt/trainings/uploads
+      # Same path on both sides, and identical to STORAGE_LOCAL_DIR in .env and to the
+      # image's VOLUME. If the container path here and STORAGE_LOCAL_DIR ever diverge,
+      # uploads land on the container's own layer and are destroyed by the next
+      # redeploy — with no error at any point. Kept outside the repo so a fresh clone
+      # or a rebuild cannot delete uploaded files.
+      # The host directory must be owned by 1001:1001 (the image's app user), or every
+      # write fails with EACCES:
+      #   sudo mkdir -p /opt/uploads && sudo chown -R 1001:1001 /opt/uploads
+      - /opt/uploads:/opt/uploads
 
     healthcheck:
       # Readiness, not the aggregate health: readiness is scoped to the database,

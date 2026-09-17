@@ -2,6 +2,7 @@ package com.eduplatform.eduplatform_backend.course.web.mapper;
 
 import com.eduplatform.eduplatform_backend.catalog.domain.Category;
 import com.eduplatform.eduplatform_backend.catalog.domain.Tag;
+import com.eduplatform.eduplatform_backend.common.enums.CourseType;
 import com.eduplatform.eduplatform_backend.course.domain.Course;
 import com.eduplatform.eduplatform_backend.course.domain.CourseModule;
 import com.eduplatform.eduplatform_backend.course.domain.Lesson;
@@ -13,6 +14,8 @@ import org.mapstruct.Mapper;
 import org.mapstruct.Mapping;
 import org.mapstruct.Named;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
@@ -25,6 +28,8 @@ public interface CourseMapper {
     @Mapping(target = "tutorId", source = "tutor.id")
     @Mapping(target = "tutorDisplayName", expression = "java(course.getTutor() == null ? null : course.getTutor().getUser().getFirstName() + \" \" + course.getTutor().getUser().getLastName())")
     @Mapping(target = "tutors", expression = "java(toTutorDtos(course))")
+    @Mapping(target = "totalDurationSec", expression = "java(totalDurationSec(course))")
+    @Mapping(target = "thumbnailUrl", expression = "java(thumbnailUrl(course))")
     CourseSummaryDto toSummaryDto(Course course);
 
     @Mapping(target = "tutorId", source = "tutor.id")
@@ -98,5 +103,36 @@ public interface CourseMapper {
     private static String displayNameOf(TutorProfile t) {
         if (t == null || t.getUser() == null) return null;
         return t.getUser().getFirstName() + " " + t.getUser().getLastName();
+    }
+
+    /**
+     * Course length in seconds for both course types, so one catalog card and one
+     * duration filter can speak about either. The offline conversion rounds half up,
+     * matching Postgres' {@code round()} in the duration-bucket predicate — otherwise a
+     * card could show a length the bucket it was filtered into does not cover.
+     */
+    default Integer totalDurationSec(Course course) {
+        if (course == null) return null;
+        if (course.getCourseType() == CourseType.OFFLINE) {
+            OfflineCourseDetails offline = course.getOfflineDetails();
+            if (offline == null || offline.getTotalHours() == null) return null;
+            return offline.getTotalHours()
+                    .multiply(BigDecimal.valueOf(3600))
+                    .setScale(0, RoundingMode.HALF_UP)
+                    .intValue();
+        }
+        OnlineCourseDetails online = course.getOnlineDetails();
+        return online == null ? null : online.getTotalVideoSeconds();
+    }
+
+    /**
+     * Where the browser can fetch the thumbnail. Relative, because the API is reached
+     * under more than one host, and pointed at the anonymous media endpoint that serves
+     * published-course marketing assets only. Reading the id off the lazy proxy costs
+     * no extra select.
+     */
+    default String thumbnailUrl(Course course) {
+        if (course == null || course.getThumbnail() == null) return null;
+        return "/api/public/media/" + course.getThumbnail().getId() + "/content";
     }
 }

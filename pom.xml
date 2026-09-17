@@ -7,7 +7,10 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.3.5</version>
+        <!-- Newest 3.3.x patch, taken for the CVE fixes in the managed Spring/Tomcat/
+             Jackson versions. Deliberately NOT 3.4/3.5: a minor upgrade changes
+             Hibernate and Security defaults and needs its own testing pass. -->
+        <version>3.3.13</version>
         <relativePath/>
     </parent>
 
@@ -20,7 +23,11 @@
     <properties>
         <java.version>17</java.version>
         <mapstruct.version>1.6.3</mapstruct.version>
-        <lombok.version>1.18.34</lombok.version>
+        <!-- 1.18.34 cannot compile on JDK 21+ at all: annotation processing dies with
+             "ExceptionInInitializerError: TypeTag :: UNKNOWN". java.version stays 17
+             (the Docker build runs temurin 17, so the artefact is unchanged) — this is
+             only so the project also builds on a current local JDK. -->
+        <lombok.version>1.18.46</lombok.version>
         <lombok-mapstruct-binding.version>0.2.0</lombok-mapstruct-binding.version>
         <jjwt.version>0.12.6</jjwt.version>
         <springdoc.version>2.6.0</springdoc.version>

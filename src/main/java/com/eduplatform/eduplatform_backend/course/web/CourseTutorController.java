@@ -37,12 +37,16 @@ public class CourseTutorController {
 
     @GetMapping
     @PreAuthorize("hasAuthority('course:read')")
-    @Operation(summary = "List my own courses (all statuses), optionally filtered by status")
+    @Operation(summary = "List my own courses (all statuses), optionally filtered by status and free text",
+            description = "`q` matches the title, subtitle or slug, case-insensitively, across every "
+                    + "page of the result — not just the page being returned.")
     public ApiResponse<PageResponse<CourseSummaryDto>> mine(
             @RequestParam(required = false) CourseStatus status,
+            @RequestParam(required = false) String q,
             @CurrentUser AuthenticatedPrincipal me,
             Pageable pageable) {
-        return ApiResponse.ok(PageResponse.of(service.listMine(me.userId(), status, pageable), mapper::toSummaryDto));
+        return ApiResponse.ok(
+                PageResponse.of(service.listMine(me.userId(), status, q, pageable), mapper::toSummaryDto));
     }
 
     @PostMapping

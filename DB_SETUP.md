@@ -256,6 +256,34 @@ sudo -u postgres dropdb eduplatform_restore_test
 Copy the dumps off this server. A backup on the same disk as the database only
 survives the failures that were never going to hurt you.
 
+### Uploaded files are not in the dump
+
+`pg_dump` captures the `media_files` **rows** — id, object key, MIME type, size,
+SHA-256 — but not the bytes. With `STORAGE_PROVIDER=LOCAL` those live on disk at
+`STORAGE_LOCAL_DIR` (`/opt/uploads`). Restoring only the database therefore gives
+you a catalogue of thumbnails and lesson videos that all 404: every row still
+points at an object key that no longer exists on disk.
+
+Back the directory up alongside the database, and from the same cron run so the
+two stay close enough in time to be useful together:
+
+```bash
+sudo -u postgres tee -a /usr/local/bin/backup-eduplatform.sh >/dev/null <<'EOF'
+tar -C /opt -czf "$DEST/uploads-$(date +%F-%H%M).tar.gz" uploads
+find "$DEST" -name 'uploads-*.tar.gz' -mtime +14 -delete
+EOF
+```
+
+The `postgres` user needs read access to `/opt/uploads` for this (the directory is
+owned by uid 1001, the container's app user), so either add `postgres` to that
+group or run the file half of the backup as root.
+
+A dump and a tarball taken minutes apart can still disagree: a file uploaded
+between the two exists on disk with no row, or has a row with no file. Neither
+breaks the application — an orphan file is inert and a row whose object key is
+missing surfaces as a 404 on that one asset — so it is not worth solving with
+snapshots. It is worth knowing before you are mid-restore and counting files.
+
 ## 10. Sizing
 
 `DB_POOL_MAX` defaults to 20 connections per backend instance; PostgreSQL's
