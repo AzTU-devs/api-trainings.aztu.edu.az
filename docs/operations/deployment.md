@@ -14,7 +14,19 @@ PostgreSQL, tuning and backups.
 | --- | --- | --- | --- |
 | Backend API | `api-trainings.aztu.edu.az` | `127.0.0.1:8080` | `api-trainings.aztu.edu.az` |
 | Public site | `trainings.aztu.edu.az` | `127.0.0.1:3000` | `trainings.aztu.edu.az` |
-| Admin portal | `admin-trainings.aztu.edu.az` | `127.0.0.1:8081` | `admin-trainings.aztu.edu.az` |
+| Admin portal | `admin-trainings.aztu.edu.az` | `127.0.0.1:8081` | `dashboard-trainings.aztu.edu.az` |
+
+The admin portal's repo is named `admin-trainings` but it is **served at
+`dashboard-trainings.aztu.edu.az`**. Anything that names a host — CSP, CORS,
+`FRONTEND_PORTAL_URL`, `NEXT_PUBLIC_PORTAL_URL`, nginx `server_name` — must use
+`dashboard-trainings`.
+
+The port above is the host-networked prod compose file. The portal can also run
+under the bridged `docker-compose.yml` with `PORT` set (the live server uses
+3001). That works, but in that mode the container's own `/api` proxy cannot
+reach the host's API, so the portal must be built with an absolute
+`VITE_API_BASE_URL=https://api-trainings.aztu.edu.az/api` and calls the API
+cross-origin. Its CSP allows both.
 
 All three prod compose files use `network_mode: host`, so each binds a host port
 directly over **plain HTTP**. Nothing in any repo terminates TLS. A reverse proxy
@@ -158,7 +170,7 @@ server {
 
 server {
     listen 443 ssl http2;
-    server_name admin-trainings.aztu.edu.az;
+    server_name dashboard-trainings.aztu.edu.az;
     # The container's own nginx handles /api/ and /ws internally, so everything
     # goes to one upstream. It rewrites $remote_addr from the X-Forwarded-For set
     # above (set_real_ip_from 127.0.0.1), which is why this proxy must run on
@@ -196,7 +208,7 @@ server {
 ```bash
 sudo ln -s /etc/nginx/sites-available/trainings /etc/nginx/sites-enabled/
 sudo nginx -t
-sudo certbot --nginx -d trainings.aztu.edu.az -d admin-trainings.aztu.edu.az -d api-trainings.aztu.edu.az
+sudo certbot --nginx -d trainings.aztu.edu.az -d dashboard-trainings.aztu.edu.az -d api-trainings.aztu.edu.az
 sudo systemctl reload nginx
 ```
 
@@ -230,7 +242,7 @@ sed -i 's/^ADMIN_SELF_REGISTER=false/ADMIN_SELF_REGISTER=true/' .env
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-Register at `https://admin-trainings.aztu.edu.az`, which sends an OTP. **With
+Register at `https://dashboard-trainings.aztu.edu.az`, which sends an OTP. **With
 `MAIL_ENABLED=false` no mail is sent — the OTP is written to the log instead:**
 
 ```bash
@@ -255,7 +267,7 @@ Check behaviour, not just that containers are up.
 # Health
 curl -fsS https://api-trainings.aztu.edu.az/actuator/health/readiness
 curl -fsS https://trainings.aztu.edu.az/api/health
-curl -fsS https://admin-trainings.aztu.edu.az/healthz
+curl -fsS https://dashboard-trainings.aztu.edu.az/healthz
 
 # Public catalogue, with filters applied server-side
 curl -fsS 'https://api-trainings.aztu.edu.az/api/public/courses?type=ONLINE&level=BEGINNER&size=5'
