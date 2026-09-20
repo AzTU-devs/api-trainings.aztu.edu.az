@@ -1,7 +1,6 @@
 package com.eduplatform.eduplatform_backend.course.repo;
 
 import com.eduplatform.eduplatform_backend.common.enums.CourseStatus;
-import com.eduplatform.eduplatform_backend.common.error.Errors;
 import com.eduplatform.eduplatform_backend.course.domain.Course;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.Query;
@@ -12,7 +11,6 @@ import org.springframework.data.domain.Sort;
 
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -31,8 +29,8 @@ import java.util.stream.Collectors;
  *       catalogue indexes even for the common bare browse — here a predicate is
  *       emitted only when its filter is actually supplied;</li>
  *   <li>Spring Data cannot apply a {@code Sort} to a native query (it appends the
- *       raw property name, which is not a column), so ORDER BY is built from a
- *       whitelist below.</li>
+ *       raw property name, which is not a column), so ORDER BY is built from the
+ *       {@link CourseCatalogSort} whitelist.</li>
  * </ul>
  *
  * <p>Only compile-time SQL fragments are ever concatenated; every value that came
@@ -57,20 +55,6 @@ public class CourseCatalogRepositoryImpl implements CourseCatalogRepository {
                 when 'ONLINE' then ocd.total_video_seconds
                 when 'OFFLINE' then round(fcd.total_hours * 3600)
             end""";
-
-    /**
-     * Sortable columns, keyed by the entity property clients pass in {@code sort}.
-     * Anything outside this map is rejected rather than interpolated — this is the one
-     * place a request could otherwise reach the SQL text.
-     */
-    private static final Map<String, String> SORTABLE_COLUMNS = Map.of(
-            "publishedat", "c.published_at",
-            "createdat", "c.created_at",
-            "title", "c.title",
-            "price", "c.price",
-            "ratingavg", "c.rating_avg",
-            "ratingcount", "c.rating_count",
-            "enrolledcount", "c.enrolled_count");
 
     private final EntityManager em;
 
@@ -159,10 +143,15 @@ public class CourseCatalogRepositoryImpl implements CourseCatalogRepository {
             }
         }
         if (filter.q() != null) {
-            // Same matching as the search endpoint has always used: the full-text index
-            // first, with an ILIKE fallback for the partial words plainto_tsquery drops.
+            // Whole words go through the full-text expression, which must stay identical to
+            // idx_courses_search (see SEARCH_DOCUMENT). plainto_tsquery only matches whole
+            // words, so a partial one ("reliab") falls back to ILIKE. The fallback covers the
+            // subtitle as well as the title: those are the two fields on the card, so a
+            // visitor typing part of a word they can see there expects a hit. The description
+            // stays whole-word only; a substring of long free text matches too much by accident.
             sql.append(" and (").append(SEARCH_DOCUMENT).append(" @@ ").append(SEARCH_QUERY)
-                    .append(" or c.title ilike concat('%', :q, '%'))");
+                    .append(" or c.title ilike concat('%', :q, '%')")
+                    .append(" or c.subtitle ilike concat('%', :q, '%'))");
             params.put("q", filter.q());
         }
         return new Where(sql.toString(), params, bucket != null);
@@ -181,7 +170,8 @@ public class CourseCatalogRepositoryImpl implements CourseCatalogRepository {
         StringBuilder sql = new StringBuilder(" order by ");
         if (sort.isSorted()) {
             sql.append(sort.stream()
-                    .map(order -> columnFor(order.getProperty()) + (order.isAscending() ? " asc" : " desc") + " nulls last")
+                    .map(order -> CourseCatalogSort.columnFor(order.getProperty())
+                            + (order.isAscending() ? " asc" : " desc") + " nulls last")
                     .collect(Collectors.joining(", ")));
         } else if (filter.q() != null) {
             // An unsorted search is ranked: full-text hits first, the ILIKE-only
@@ -195,15 +185,6 @@ public class CourseCatalogRepositoryImpl implements CourseCatalogRepository {
         // ordered arbitrarily per query, so a row could repeat on page 2 and be missed
         // on page 1.
         return sql.append(", c.id desc").toString();
-    }
-
-    private static String columnFor(String property) {
-        String column = SORTABLE_COLUMNS.get(property.replace("_", "").toLowerCase(Locale.ROOT));
-        if (column == null) {
-            throw Errors.badRequest("INVALID_SORT_PROPERTY", "Courses cannot be sorted by '" + property
-                    + "'; use one of publishedAt, createdAt, title, price, ratingAvg, ratingCount, enrolledCount");
-        }
-        return column;
     }
 
     /**

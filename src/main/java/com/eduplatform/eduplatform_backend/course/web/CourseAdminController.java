@@ -59,9 +59,10 @@ public class CourseAdminController {
                     + "since the course belongs to the university rather than to whoever creates it. "
                     + "authorizedTutorId nominates the single tutor permitted to edit the course and "
                     + "must be one of tutorIds.")
-    public ResponseEntity<ApiResponse<CourseDto>> create(@Valid @RequestBody AdminCreateCourseRequest req) {
+    public ResponseEntity<ApiResponse<CourseDto>> create(@Valid @RequestBody AdminCreateCourseRequest req,
+                                                         @CurrentUser AuthenticatedPrincipal me) {
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(ApiResponse.ok(mapper.toDto(service.createByAdmin(req))));
+                .body(ApiResponse.ok(mapper.toDto(service.createByAdmin(me, req))));
     }
 
     @PutMapping("/{id}/tutors")

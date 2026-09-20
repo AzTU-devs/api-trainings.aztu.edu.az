@@ -99,7 +99,12 @@ public class OrderService {
 
     @Transactional(readOnly = true)
     public Page<Order> mine(UUID userId, Pageable pageable) {
-        return orders.findAllByUserIdOrderByPlacedAtDesc(userId, pageable);
+        Page<Order> page = orders.findAllByUserIdOrderByPlacedAtDesc(userId, pageable);
+        // PaymentMapper reads the lazy items after the session has closed (open-in-view=false),
+        // so they are loaded here. @BatchSize on Order.items makes that one query per 50 orders,
+        // not one per order. A fetch join would instead make Hibernate paginate in memory.
+        page.forEach(o -> o.getItems().size());
+        return page;
     }
 
     private OrderItem toItem(Order order, OrderCreateRequest.Line line, String orderCurrency) {

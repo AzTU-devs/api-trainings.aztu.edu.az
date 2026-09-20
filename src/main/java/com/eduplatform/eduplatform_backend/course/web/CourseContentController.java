@@ -30,6 +30,12 @@ import java.util.UUID;
 @PreAuthorize("hasAuthority('course:update_own')")
 public class CourseContentController {
 
+    private static final String LESSON_MEDIA_RULES =
+            "videoMediaId must name media the caller uploaded (admins may use any), which has "
+                    + "finished uploading and suits the contentType: a video for VIDEO, a PDF for PDF, "
+                    + "and any stored image, video or PDF for TEXT, QUIZ and LIVE_SESSION. Otherwise "
+                    + "404 MEDIA_NOT_FOUND, 403 MEDIA_FORBIDDEN or 422 INVALID_MEDIA_FOR_FIELD.";
+
     private final CourseContentService service;
     private final CourseMapper mapper;
 
@@ -79,20 +85,24 @@ public class CourseContentController {
     }
 
     @PostMapping("/modules/{moduleId}/lessons")
-    @Operation(summary = "Add a lesson to a module")
+    @Operation(summary = "Add a lesson to a module", description = LESSON_MEDIA_RULES)
     public ResponseEntity<ApiResponse<LessonDto>> addLesson(@PathVariable UUID moduleId,
                                                             @Valid @RequestBody LessonUpsertRequest req,
                                                             @CurrentUser AuthenticatedPrincipal me) {
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(ApiResponse.ok(mapper.toLessonDto(service.addLesson(me.userId(), moduleId, req))));
+                .body(ApiResponse.ok(mapper.toLessonDto(service.addLesson(me, moduleId, req))));
     }
 
     @PutMapping("/lessons/{lessonId}")
-    @Operation(summary = "Update a lesson")
+    @Operation(summary = "Update a lesson",
+            description = LESSON_MEDIA_RULES
+                    + " A full replacement: a null videoMediaId removes the lesson's file. Resending "
+                    + "the lesson's current videoMediaId keeps it without those checks, except that a "
+                    + "change of contentType re-checks its status and kind.")
     public ApiResponse<LessonDto> updateLesson(@PathVariable UUID lessonId,
                                                @Valid @RequestBody LessonUpsertRequest req,
                                                @CurrentUser AuthenticatedPrincipal me) {
-        return ApiResponse.ok(mapper.toLessonDto(service.updateLesson(me.userId(), lessonId, req)));
+        return ApiResponse.ok(mapper.toLessonDto(service.updateLesson(me, lessonId, req)));
     }
 
     @DeleteMapping("/lessons/{lessonId}")

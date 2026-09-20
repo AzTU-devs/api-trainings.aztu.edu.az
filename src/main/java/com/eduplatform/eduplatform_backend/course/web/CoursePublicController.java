@@ -2,6 +2,7 @@ package com.eduplatform.eduplatform_backend.course.web;
 
 import com.eduplatform.eduplatform_backend.common.enums.CourseLevel;
 import com.eduplatform.eduplatform_backend.common.enums.CourseType;
+import com.eduplatform.eduplatform_backend.common.security.AuthenticatedPrincipal;
 import com.eduplatform.eduplatform_backend.common.web.ApiResponse;
 import com.eduplatform.eduplatform_backend.common.web.PageResponse;
 import com.eduplatform.eduplatform_backend.course.repo.CourseCatalogFilter;
@@ -13,6 +14,8 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.data.domain.Pageable;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 
 import java.math.BigDecimal;
@@ -66,8 +69,30 @@ public class CoursePublicController {
     }
 
     @GetMapping("/{slug}")
-    @Operation(summary = "Course detail by slug", security = {})
+    @Operation(summary = "Course detail by slug",
+            description = "Published courses, and archived courses that were published before being "
+                    + "archived, are served to anyone; archived ones are left out of the catalogue but "
+                    + "stay reachable here for the students enrolled in them. A DRAFT, IN_REVIEW or "
+                    + "REJECTED course, or an archived one that was never published, is served only when "
+                    + "the request carries a bearer token belonging to one of the course's tutors or to "
+                    + "an admin, and is otherwise a 404 COURSE_NOT_FOUND, the same as a slug that does "
+                    + "not exist.",
+            security = {})
     public ApiResponse<CourseDto> bySlug(@PathVariable String slug) {
-        return ApiResponse.ok(mapper.toDto(service.getBySlug(slug)));
+        return ApiResponse.ok(mapper.toDto(service.getBySlug(slug, optionalCaller())));
+    }
+
+    /**
+     * The caller, if the request carried a valid access token; null for an anonymous one.
+     *
+     * <p>Not {@code @CurrentUser}, which rejects anonymous requests — this route is permitAll
+     * and must keep serving the public site. JwtAuthFilter still runs on permitAll routes: a
+     * valid token populates the SecurityContext, no token leaves it empty, and an invalid or
+     * expired one is answered with a 401 before this method is reached, which the dashboard
+     * already handles by refreshing and retrying.
+     */
+    private static AuthenticatedPrincipal optionalCaller() {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        return auth != null && auth.getPrincipal() instanceof AuthenticatedPrincipal principal ? principal : null;
     }
 }

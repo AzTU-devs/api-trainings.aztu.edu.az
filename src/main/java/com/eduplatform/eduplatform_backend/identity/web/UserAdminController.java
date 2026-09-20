@@ -2,6 +2,8 @@ package com.eduplatform.eduplatform_backend.identity.web;
 
 import com.eduplatform.eduplatform_backend.common.enums.RoleCode;
 import com.eduplatform.eduplatform_backend.common.enums.UserStatus;
+import com.eduplatform.eduplatform_backend.common.security.AuthenticatedPrincipal;
+import com.eduplatform.eduplatform_backend.common.security.CurrentUser;
 import com.eduplatform.eduplatform_backend.common.web.ApiResponse;
 import com.eduplatform.eduplatform_backend.common.web.PageResponse;
 import com.eduplatform.eduplatform_backend.identity.service.UserAdminService;
@@ -47,26 +49,29 @@ public class UserAdminController {
 
     @PostMapping
     @Operation(summary = "Create a user account")
-    public ResponseEntity<ApiResponse<AdminUserDto>> create(@Valid @RequestBody AdminUserCreateRequest req) {
-        return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.ok(service.create(req)));
+    public ResponseEntity<ApiResponse<AdminUserDto>> create(@Valid @RequestBody AdminUserCreateRequest req,
+                                                            @CurrentUser AuthenticatedPrincipal me) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.ok(service.create(req, me.userId())));
     }
 
     @PutMapping("/{id}")
     @Operation(summary = "Update a user account")
-    public ApiResponse<AdminUserDto> update(@PathVariable UUID id, @Valid @RequestBody AdminUserUpdateRequest req) {
-        return ApiResponse.ok(service.update(id, req));
+    public ApiResponse<AdminUserDto> update(@PathVariable UUID id, @Valid @RequestBody AdminUserUpdateRequest req,
+                                            @CurrentUser AuthenticatedPrincipal me) {
+        return ApiResponse.ok(service.update(id, req, me.userId()));
     }
 
     @PatchMapping("/{id}/status")
     @Operation(summary = "Enable / disable a user account")
-    public ApiResponse<AdminUserDto> setStatus(@PathVariable UUID id, @Valid @RequestBody UserStatusUpdateRequest req) {
-        return ApiResponse.ok(service.setStatus(id, req.status()));
+    public ApiResponse<AdminUserDto> setStatus(@PathVariable UUID id, @Valid @RequestBody UserStatusUpdateRequest req,
+                                               @CurrentUser AuthenticatedPrincipal me) {
+        return ApiResponse.ok(service.setStatus(id, req.status(), me.userId()));
     }
 
     @DeleteMapping("/{id}")
     @Operation(summary = "Soft-delete a user account")
-    public ResponseEntity<Void> delete(@PathVariable UUID id) {
-        service.delete(id);
+    public ResponseEntity<Void> delete(@PathVariable UUID id, @CurrentUser AuthenticatedPrincipal me) {
+        service.delete(id, me.userId());
         return ResponseEntity.noContent().build();
     }
 

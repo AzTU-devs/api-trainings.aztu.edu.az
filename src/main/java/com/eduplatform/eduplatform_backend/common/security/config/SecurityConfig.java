@@ -5,6 +5,7 @@ import com.eduplatform.eduplatform_backend.common.security.RestAuthEntryPoint;
 import com.eduplatform.eduplatform_backend.common.security.filter.JwtAuthFilter;
 import com.eduplatform.eduplatform_backend.common.security.oauth.OAuth2LoginSuccessHandler;
 import com.eduplatform.eduplatform_backend.common.security.ratelimit.AuthRateLimitFilter;
+import jakarta.servlet.DispatcherType;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -53,6 +54,14 @@ public class SecurityConfig {
                     .requestMatchers("/actuator/health", "/actuator/health/**",
                             "/actuator/info", "/actuator/prometheus").permitAll()
                     .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
+                    // Spring Boot's error page. Errors raised outside MVC (a URL the firewall
+                    // rejects, an exception thrown by a filter) are forwarded to /error as an
+                    // ERROR dispatch, which runs through this chain again. Without this line every
+                    // one of them surfaced as 401 with path /error, hiding the real status.
+                    // Matched on the dispatch type, not the path, so a direct external GET /error
+                    // gets the ordinary 401 instead of an empty error page rendered as a 500 that
+                    // 5xx alerting counts.
+                    .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                     // Auth endpoints (open)
                     .requestMatchers(HttpMethod.POST,
                             "/api/auth/register",
@@ -64,7 +73,14 @@ public class SecurityConfig {
                             "/api/auth/admin/register/verify",
                             "/api/auth/password/forgot",
                             "/api/auth/password/reset",
-                            "/api/auth/email/verify/confirm").permitAll()
+                            "/api/auth/email/verify/confirm",
+                            // Revokes only the refresh token it is handed (body or cookie) and
+                            // always clears the cookie, so it needs no access token. Requiring
+                            // one meant a user whose access token had expired could not sign out,
+                            // and the public site's BFF, which sends none, never revoked anything.
+                            // JwtAuthFilter likewise ignores an expired or invalid bearer here
+                            // instead of answering 401 before this rule is reached.
+                            "/api/auth/logout").permitAll()
                     .requestMatchers("/api/auth/oauth/**").permitAll()
                     // WebSocket handshake — STOMP CONNECT enforces JWT at the message layer
                     .requestMatchers("/ws", "/ws/**").permitAll()

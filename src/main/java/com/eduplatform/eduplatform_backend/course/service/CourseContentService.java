@@ -1,16 +1,17 @@
 package com.eduplatform.eduplatform_backend.course.service;
 
 import com.eduplatform.eduplatform_backend.common.error.Errors;
+import com.eduplatform.eduplatform_backend.common.security.AuthenticatedPrincipal;
 import com.eduplatform.eduplatform_backend.course.domain.Course;
 import com.eduplatform.eduplatform_backend.course.domain.CourseModule;
 import com.eduplatform.eduplatform_backend.course.domain.Lesson;
 import com.eduplatform.eduplatform_backend.course.repo.CourseModuleRepository;
 import com.eduplatform.eduplatform_backend.course.repo.CourseRepository;
 import com.eduplatform.eduplatform_backend.course.repo.LessonRepository;
+import com.eduplatform.eduplatform_backend.course.service.CourseMediaValidator.MediaField;
 import com.eduplatform.eduplatform_backend.course.web.dto.LessonUpsertRequest;
 import com.eduplatform.eduplatform_backend.course.web.dto.ModuleUpsertRequest;
 import com.eduplatform.eduplatform_backend.media.domain.MediaFile;
-import com.eduplatform.eduplatform_backend.media.repo.MediaFileRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -27,14 +28,14 @@ public class CourseContentService {
     private final CourseRepository courses;
     private final CourseModuleRepository modules;
     private final LessonRepository lessons;
-    private final MediaFileRepository media;
+    private final CourseMediaValidator mediaValidator;
 
     public CourseContentService(CourseRepository courses, CourseModuleRepository modules,
-                                LessonRepository lessons, MediaFileRepository media) {
+                                LessonRepository lessons, CourseMediaValidator mediaValidator) {
         this.courses = courses;
         this.modules = modules;
         this.lessons = lessons;
-        this.media = media;
+        this.mediaValidator = mediaValidator;
     }
 
     // ---------------- modules ----------------
@@ -83,14 +84,15 @@ public class CourseContentService {
     }
 
     @Transactional
-    public Lesson addLesson(UUID userId, UUID moduleId, LessonUpsertRequest req) {
-        CourseModule module = loadOwnedModule(userId, moduleId);
+    public Lesson addLesson(AuthenticatedPrincipal caller, UUID moduleId, LessonUpsertRequest req) {
+        CourseModule module = loadOwnedModule(caller.userId(), moduleId);
         Lesson l = Lesson.builder()
                 .module(module)
                 .title(req.title())
                 .description(req.description())
                 .contentType(req.contentType())
-                .videoMedia(resolveMedia(req.videoMediaId()))
+                .videoMedia(mediaValidator.resolve(
+                        req.videoMediaId(), MediaField.lessonMaterial(req.contentType()), caller))
                 .videoUrl(req.videoUrl())
                 .durationSeconds(req.durationSeconds())
                 .orderIndex(req.orderIndex())
@@ -101,12 +103,14 @@ public class CourseContentService {
     }
 
     @Transactional
-    public Lesson updateLesson(UUID userId, UUID lessonId, LessonUpsertRequest req) {
-        Lesson l = loadOwnedLesson(userId, lessonId);
+    public Lesson updateLesson(AuthenticatedPrincipal caller, UUID lessonId, LessonUpsertRequest req) {
+        Lesson l = loadOwnedLesson(caller.userId(), lessonId);
+        // Before setContentType: whether the kind of file the lesson needs has changed is
+        // judged against the content type it has now.
+        l.setVideoMedia(materialForUpdate(l, req, caller));
         l.setTitle(req.title());
         l.setDescription(req.description());
         l.setContentType(req.contentType());
-        l.setVideoMedia(resolveMedia(req.videoMediaId()));
         l.setVideoUrl(req.videoUrl());
         l.setDurationSeconds(req.durationSeconds());
         l.setOrderIndex(req.orderIndex());
@@ -142,10 +146,29 @@ public class CourseContentService {
         return l;
     }
 
-    private MediaFile resolveMedia(UUID mediaId) {
-        if (mediaId == null) return null;
-        return media.findById(mediaId)
-                .orElseThrow(() -> Errors.badRequest("INVALID_MEDIA", "Unknown media: " + mediaId));
+    /**
+     * The file an updated lesson ends up with. The request is a full replacement, so a null id
+     * removes the file.
+     *
+     * <p>An id equal to the lesson's current one is left alone rather than re-validated,
+     * because the dashboard resends the lesson's current id with every save: re-checking would
+     * fail an unrelated title edit whenever the file was attached before these checks existed,
+     * or by a tutor the course has since been handed away from. When the content type changes
+     * the kept file's kind is re-checked, though not its owner, since a lesson switched from
+     * VIDEO to PDF would otherwise go on serving a video. Any other id is a new attachment and
+     * gets every check.
+     */
+    private MediaFile materialForUpdate(Lesson lesson, LessonUpsertRequest req, AuthenticatedPrincipal caller) {
+        MediaField field = MediaField.lessonMaterial(req.contentType());
+        MediaFile current = lesson.getVideoMedia();
+        // Reading the id off a lazy proxy does not load the row.
+        if (req.videoMediaId() == null || current == null || !req.videoMediaId().equals(current.getId())) {
+            return mediaValidator.resolve(req.videoMediaId(), field, caller);
+        }
+        if (req.contentType() != lesson.getContentType()) {
+            mediaValidator.recheckKept(current, field);
+        }
+        return current;
     }
 
     private void requireOwner(Course course, UUID userId) {

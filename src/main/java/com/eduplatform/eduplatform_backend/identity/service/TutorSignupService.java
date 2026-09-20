@@ -128,10 +128,10 @@ public class TutorSignupService {
             throw Errors.unprocessable("OTP_TOO_MANY_ATTEMPTS", "Too many failed attempts; please start signup again");
         }
         if (!row.getOtpHash().equals(TokenHasher.sha256Hex(req.otp()))) {
-            row.setAttempts((short) (row.getAttempts() + 1));
-            otps.save(row);
+            // Committed separately: the 401 below rolls this transaction back.
+            otps.recordFailedAttemptAndCommit(row.getId());
             throw Errors.unauthorized("OTP_INVALID",
-                    "OTP is incorrect (" + (MAX_ATTEMPTS - row.getAttempts()) + " attempts remaining)");
+                    "OTP is incorrect (" + (MAX_ATTEMPTS - row.getAttempts() - 1) + " attempts remaining)");
         }
         if (users.existsByEmailIgnoreCase(row.getEmail())) {
             otps.delete(row);

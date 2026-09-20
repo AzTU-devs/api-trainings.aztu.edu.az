@@ -32,7 +32,10 @@ public class ReviewController {
     }
 
     @GetMapping("/api/public/courses/{courseId}/reviews")
-    @Operation(summary = "List reviews for a course", security = {})
+    @Operation(summary = "List reviews for a course",
+            description = "Newest first by default. sort accepts createdAt and rating only; any other "
+                    + "property is a 400 INVALID_SORT_PROPERTY.",
+            security = {})
     public ApiResponse<PageResponse<CourseReviewDto>> list(@PathVariable UUID courseId, Pageable pageable) {
         return ApiResponse.ok(PageResponse.of(service.forCourse(courseId, pageable), mapper::toDto));
     }

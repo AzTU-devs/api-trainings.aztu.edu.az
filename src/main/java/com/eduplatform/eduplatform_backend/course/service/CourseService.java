@@ -8,19 +8,24 @@ import com.eduplatform.eduplatform_backend.catalog.repo.TagRepository;
 import com.eduplatform.eduplatform_backend.common.enums.BookingDecision;
 import com.eduplatform.eduplatform_backend.common.enums.CourseStatus;
 import com.eduplatform.eduplatform_backend.common.enums.CourseType;
+import com.eduplatform.eduplatform_backend.common.enums.RoleCode;
 import com.eduplatform.eduplatform_backend.common.enums.TutorApprovalStatus;
 import com.eduplatform.eduplatform_backend.common.error.Errors;
+import com.eduplatform.eduplatform_backend.common.security.AuthenticatedPrincipal;
 import com.eduplatform.eduplatform_backend.course.domain.Course;
 import com.eduplatform.eduplatform_backend.course.domain.OfflineCourseDetails;
 import com.eduplatform.eduplatform_backend.course.domain.OnlineCourseDetails;
 import com.eduplatform.eduplatform_backend.course.repo.CourseCatalogFilter;
+import com.eduplatform.eduplatform_backend.course.repo.CourseCatalogSort;
 import com.eduplatform.eduplatform_backend.course.repo.CourseRepository;
+import com.eduplatform.eduplatform_backend.course.service.CourseMediaValidator.MediaField;
 import com.eduplatform.eduplatform_backend.course.web.dto.AdminCreateCourseRequest;
 import com.eduplatform.eduplatform_backend.course.web.dto.CreateCourseRequest;
 import com.eduplatform.eduplatform_backend.course.web.dto.OfflineDetailsDto;
 import com.eduplatform.eduplatform_backend.course.web.dto.OnlineDetailsDto;
 import com.eduplatform.eduplatform_backend.course.web.dto.SetCourseTutorsRequest;
 import com.eduplatform.eduplatform_backend.course.web.dto.UpdateCourseRequest;
+import com.eduplatform.eduplatform_backend.media.domain.MediaFile;
 import com.eduplatform.eduplatform_backend.tutor.domain.TutorProfile;
 import com.eduplatform.eduplatform_backend.tutor.repo.TutorProfileRepository;
 import org.springframework.beans.factory.annotation.Value;
@@ -41,16 +46,19 @@ public class CourseService {
     private final TutorProfileRepository tutors;
     private final CategoryRepository categories;
     private final TagRepository tags;
+    private final CourseMediaValidator mediaValidator;
     private final AuditService audit;
     private final boolean paymentsEnabled;
 
     public CourseService(CourseRepository courses, TutorProfileRepository tutors,
-                         CategoryRepository categories, TagRepository tags, AuditService audit,
+                         CategoryRepository categories, TagRepository tags, CourseMediaValidator mediaValidator,
+                         AuditService audit,
                          @Value("${app.payments.enabled:false}") boolean paymentsEnabled) {
         this.courses = courses;
         this.tutors = tutors;
         this.categories = categories;
         this.tags = tags;
+        this.mediaValidator = mediaValidator;
         this.audit = audit;
         this.paymentsEnabled = paymentsEnabled;
     }
@@ -63,23 +71,87 @@ public class CourseService {
         return c;
     }
 
+    /**
+     * Course detail by slug, as the public endpoint serves it.
+     *
+     * <p>A PUBLISHED course, and an ARCHIVED one that was published before it was archived, is
+     * visible to anyone, paid ones included. Every other course — DRAFT, IN_REVIEW, REJECTED,
+     * or ARCHIVED without ever having been published — is visible only to one of the course's
+     * own tutors or to an admin: the dashboard opens drafts for editing and looks up IN_REVIEW
+     * courses for moderation through this same endpoint, with its bearer token attached.
+     *
+     * <p>Everyone else gets the same 404 as for a slug that does not exist, never a 403 —
+     * a 403 would confirm that an unpublished course lives at that slug.
+     *
+     * @param viewer the caller if the request carried a valid access token, else null
+     */
     @Transactional(readOnly = true)
-    public Course getBySlug(String slug) {
-        Course c = courses.findBySlug(slug).orElseThrow(
-                () -> Errors.notFound("COURSE_NOT_FOUND", "Course does not exist"));
+    public Course getBySlug(String slug, AuthenticatedPrincipal viewer) {
+        Course c = courses.findBySlug(slug)
+                .filter(found -> isPublicBySlug(found) || mayViewUnpublished(found, viewer))
+                .orElseThrow(() -> Errors.notFound("COURSE_NOT_FOUND", "Course does not exist"));
         initDetailGraph(c);
         return c;
+    }
+
+    /**
+     * Whether anyone at all may open this course's detail page by slug.
+     *
+     * <p>An archived course stays public because archiving only retires it from the catalogue:
+     * the public site's learning pages load the course through this same endpoint without a
+     * token, so hiding it would lock enrolled students out of lessons they already have. That
+     * reasoning holds only for a course that went through moderation. {@link #archive} accepts
+     * a course in any status, so an ARCHIVED status alone does not mean an admin ever approved
+     * the content; publishedAt does — only an approval sets it and nothing clears it. Without
+     * this check, archiving a DRAFT or REJECTED course would publish it to the world unreviewed.
+     * Nobody can be enrolled in a never-published course either, so hiding it costs no student
+     * anything.
+     *
+     * <p>The catalogue listing filters on PUBLISHED on its own and is unaffected.
+     */
+    private static boolean isPublicBySlug(Course course) {
+        return switch (course.getStatus()) {
+            case PUBLISHED -> true;
+            case ARCHIVED -> course.getPublishedAt() != null;
+            case DRAFT, IN_REVIEW, REJECTED -> false;
+        };
+    }
+
+    private static boolean mayViewUnpublished(Course course, AuthenticatedPrincipal viewer) {
+        if (viewer == null) return false;
+        if (isAdmin(viewer)) return true;
+        UUID me = viewer.userId();
+        // The authorised editor is checked as well as the roster: they are meant to be on
+        // it, but it is the editor who opens the draft, and a roster that drifted must not
+        // lock them out of their own course.
+        if (course.getTutor() != null && me.equals(course.getTutor().getUser().getId())) return true;
+        return course.getTutors().stream()
+                .anyMatch(t -> t.getUser() != null && me.equals(t.getUser().getId()));
     }
 
     /** Public catalogue: every filter in {@code filter} is applied in SQL, not over the page. */
     @Transactional(readOnly = true)
     public Page<Course> browsePublished(CourseCatalogFilter filter, Pageable pageable) {
-        // Free-only safety net. With no payment provider wired up, a paid course in the
-        // catalogue leads to a checkout that cannot charge anyone, so the catalogue hides
-        // them regardless of what the caller asked for. Forcing the filter here rather
-        // than dropping the price model keeps re-enabling paid courses a single
-        // app.payments.enabled flip.
-        CourseCatalogFilter effective = paymentsEnabled ? filter : filter.freeOnly();
+        // Checked before anything can answer without querying: the free=false short-circuit
+        // below never builds an ORDER BY, and a sort the catalogue does not offer must be a
+        // 400 on every request, not only on the ones that happen to reach the query.
+        CourseCatalogSort.requireSortable(pageable.getSort());
+        CourseCatalogFilter effective = filter;
+        if (!paymentsEnabled) {
+            // Free-only safety net. With no payment provider wired up, a paid course in the
+            // catalogue leads to a checkout that cannot charge anyone, so the catalogue hides
+            // them regardless of what the caller asked for. Forcing the filter here rather
+            // than dropping the price model keeps re-enabling paid courses a single
+            // app.payments.enabled flip.
+            //
+            // An explicit free=false asks for paid courses only, and there are none to show:
+            // the answer is an empty page, not every free course, which is what forcing
+            // free=true over the caller's false would return.
+            if (Boolean.FALSE.equals(filter.free())) {
+                return Page.empty(pageable);
+            }
+            effective = filter.freeOnly();
+        }
         Page<Course> page = courses.browseCatalog(CourseStatus.PUBLISHED, effective, pageable);
         page.forEach(CourseService::initSummaryGraph);
         return page;
@@ -94,8 +166,7 @@ public class CourseService {
     @Transactional(readOnly = true)
     public Page<Course> listMine(UUID userId, CourseStatus status, String query, Pageable pageable) {
         // A cleared search box submits "", which must mean "no filter" and not "match the
-        // empty string" — the latter is harmless with LIKE but makes the null check below the
-        // only thing standing between a blank query and a full table scan per keystroke.
+        // empty string". Null is what tells the repository to emit no text predicate at all.
         String q = (query == null || query.isBlank()) ? null : query.trim();
         Page<Course> page = courses.searchTutorUserCourses(userId, status, q, pageable);
         page.forEach(CourseService::initSummaryGraph);
@@ -146,8 +217,8 @@ public class CourseService {
     }
 
     @Transactional
-    public Course createByTutor(UUID userId, CreateCourseRequest req) {
-        TutorProfile tutor = tutors.findByUserId(userId)
+    public Course createByTutor(AuthenticatedPrincipal caller, CreateCourseRequest req) {
+        TutorProfile tutor = tutors.findByUserId(caller.userId())
                 .orElseThrow(() -> Errors.forbidden("NOT_A_TUTOR", "Only tutors can create courses"));
         if (tutor.getApprovalStatus() != TutorApprovalStatus.APPROVED) {
             throw Errors.forbidden("TUTOR_NOT_APPROVED", "Tutor profile must be approved before creating courses");
@@ -156,7 +227,12 @@ public class CourseService {
             throw Errors.conflict("SLUG_ALREADY_EXISTS", "Course slug '" + req.slug() + "' is taken");
         }
         validateTypeSpecific(req.courseType(), req.onlineDetails(), req.offlineDetails());
+        MediaFile thumbnail = mediaValidator.resolve(req.thumbnailMediaId(), MediaField.COURSE_THUMBNAIL, caller);
+        MediaFile trailer = mediaValidator.resolve(req.trailerMediaId(), MediaField.COURSE_TRAILER, caller);
 
+        // Complete before the one save() below. The id is assigned by hand, so save() merges
+        // and hands back a managed copy: anything set on `course` after it would never be
+        // written.
         Course course = Course.builder()
                 .tutor(tutor)
                 .slug(req.slug())
@@ -166,6 +242,8 @@ public class CourseService {
                 .requirements(req.requirements())
                 .learningOutcomes(req.learningOutcomes())
                 .syllabus(req.syllabus())
+                .thumbnail(thumbnail)
+                .trailer(trailer)
                 .courseType(req.courseType())
                 .level(req.level() == null ? com.eduplatform.eduplatform_backend.common.enums.CourseLevel.ALL : req.level())
                 .language(req.language() == null ? "en" : req.language())
@@ -197,7 +275,7 @@ public class CourseService {
      * to the university either way — {@code tutor} only records who may edit it.
      */
     @Transactional
-    public Course createByAdmin(AdminCreateCourseRequest req) {
+    public Course createByAdmin(AuthenticatedPrincipal caller, AdminCreateCourseRequest req) {
         CreateCourseRequest c = req.course();
         if (courses.existsBySlug(c.slug())) {
             throw Errors.conflict("SLUG_ALREADY_EXISTS", "Course slug '" + c.slug() + "' is taken");
@@ -206,7 +284,10 @@ public class CourseService {
 
         Set<TutorProfile> roster = resolveTutors(req.tutorIds());
         TutorProfile authorized = requireAuthorizedAmong(roster, req.authorizedTutorId());
+        MediaFile thumbnail = mediaValidator.resolve(c.thumbnailMediaId(), MediaField.COURSE_THUMBNAIL, caller);
+        MediaFile trailer = mediaValidator.resolve(c.trailerMediaId(), MediaField.COURSE_TRAILER, caller);
 
+        // Complete before the one save() below, for the same reason as in createByTutor.
         Course course = Course.builder()
                 .tutor(authorized)
                 .slug(c.slug())
@@ -216,6 +297,8 @@ public class CourseService {
                 .requirements(c.requirements())
                 .learningOutcomes(c.learningOutcomes())
                 .syllabus(c.syllabus())
+                .thumbnail(thumbnail)
+                .trailer(trailer)
                 .courseType(c.courseType())
                 .level(c.level() == null ? com.eduplatform.eduplatform_backend.common.enums.CourseLevel.ALL : c.level())
                 .language(c.language() == null ? "en" : c.language())
@@ -291,10 +374,21 @@ public class CourseService {
     }
 
     @Transactional
-    public Course updateByTutor(UUID userId, UUID courseId, UpdateCourseRequest req) {
+    public Course updateByTutor(AuthenticatedPrincipal caller, UUID courseId, UpdateCourseRequest req) {
         Course course = get(courseId);
-        requireOwner(course, userId);
+        requireOwner(course, caller.userId());
 
+        // Same partial-update rule as every other field here: null leaves the current
+        // media in place. An id equal to the current one is also left alone rather than
+        // re-validated, because the dashboard resends the course's existing ids with every
+        // save — re-checking them would fail an unrelated title edit whenever the current
+        // cover was uploaded by an admin rather than by this tutor.
+        if (req.thumbnailMediaId() != null && !req.thumbnailMediaId().equals(idOf(course.getThumbnail()))) {
+            course.setThumbnail(mediaValidator.resolve(req.thumbnailMediaId(), MediaField.COURSE_THUMBNAIL, caller));
+        }
+        if (req.trailerMediaId() != null && !req.trailerMediaId().equals(idOf(course.getTrailer()))) {
+            course.setTrailer(mediaValidator.resolve(req.trailerMediaId(), MediaField.COURSE_TRAILER, caller));
+        }
         if (req.title() != null)            course.setTitle(req.title());
         if (req.subtitle() != null)         course.setSubtitle(req.subtitle());
         if (req.description() != null)      course.setDescription(req.description());
@@ -365,6 +459,16 @@ public class CourseService {
     }
 
     // ---------- helpers ----------
+
+    private static boolean isAdmin(AuthenticatedPrincipal caller) {
+        return caller.roles().contains(RoleCode.ADMIN.name())
+                || caller.roles().contains(RoleCode.SUPER_ADMIN.name());
+    }
+
+    private static UUID idOf(MediaFile m) {
+        // Reading the id off a lazy proxy does not load the row.
+        return m == null ? null : m.getId();
+    }
 
     private void requireOwner(Course course, UUID userId) {
         if (!course.getTutor().getUser().getId().equals(userId)) {

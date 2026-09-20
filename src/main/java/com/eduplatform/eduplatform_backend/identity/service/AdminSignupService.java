@@ -27,12 +27,14 @@ import org.springframework.transaction.annotation.Transactional;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 /**
- * Two-step admin self-registration with OTP. v1 keeps the endpoint open so the
- * first admin can bootstrap; harden later by requiring an invite token signed by
- * a SUPER_ADMIN before allowing {@link #start(AdminRegisterStartRequest, HttpServletRequest)}.
+ * Two-step admin self-registration with OTP, used only to bootstrap the first administrator.
+ * Both steps are refused with {@code 403 ADMIN_REGISTER_CLOSED} unless
+ * {@code app.security.admin-self-register-enabled=true} AND no ADMIN/SUPER_ADMIN user exists.
+ * Every later admin is created by an existing one through the admin users API.
  *
  * Flow:
  *   1. POST /api/auth/admin/register/start  — details validated, OTP generated, emailed.
@@ -72,13 +74,7 @@ public class AdminSignupService {
 
     @Transactional
     public AdminRegisterStartResponse start(AdminRegisterStartRequest req, HttpServletRequest http) {
-        // Bootstrap-only: once any admin exists, self-registration is closed unless explicitly enabled.
-        if (!selfRegisterEnabled && users.countByRoleCodes(java.util.List.of(
-                com.eduplatform.eduplatform_backend.common.enums.RoleCode.ADMIN,
-                com.eduplatform.eduplatform_backend.common.enums.RoleCode.SUPER_ADMIN)) > 0) {
-            throw Errors.forbidden("ADMIN_REGISTER_CLOSED",
-                    "Admin self-registration is disabled; ask an existing administrator to create your account");
-        }
+        requireRegistrationOpen();
         if (users.existsByEmailIgnoreCase(req.email())) {
             throw Errors.conflict("EMAIL_ALREADY_REGISTERED", "An account with this email already exists");
         }
@@ -116,6 +112,9 @@ public class AdminSignupService {
 
     @Transactional
     public AuthTokens verify(AdminRegisterVerifyRequest req, HttpServletRequest http) {
+        // Not only at start: an OTP issued while bootstrap was open must not mint an admin once
+        // the first one exists or the operator has turned the flag back off.
+        requireRegistrationOpen();
         AdminRegistrationOtp row = otps.findActiveByEmail(req.email())
                 .orElseThrow(() -> Errors.notFound("OTP_NOT_FOUND",
                         "No pending admin registration for this email; start signup first"));
@@ -131,11 +130,17 @@ public class AdminSignupService {
                     "Too many failed attempts; please start signup again");
         }
         if (!row.getOtpHash().equals(TokenHasher.sha256Hex(req.otp()))) {
-            row.setAttempts((short) (row.getAttempts() + 1));
-            otps.save(row);
+            // Committed separately: the 401 below rolls this transaction back.
+            otps.recordFailedAttemptAndCommit(row.getId());
             throw Errors.unauthorized("OTP_INVALID",
-                    "OTP is incorrect (" + (MAX_ATTEMPTS - row.getAttempts()) + " attempts remaining)");
+                    "OTP is incorrect (" + (MAX_ATTEMPTS - row.getAttempts() - 1) + " attempts remaining)");
         }
+
+        // Checked again under the ADMIN role row lock: two OTPs issued while bootstrap was open
+        // could otherwise be verified concurrently, both read "no admin yet" and both succeed.
+        Role adminRole = roles.findByCodeForUpdate(RoleCode.ADMIN)
+                .orElseThrow(() -> new IllegalStateException("Role ADMIN missing — V2 seed migration did not run"));
+        requireRegistrationOpen();
 
         // Race-guard: another request might have created the same email in the meantime.
         if (users.existsByEmailIgnoreCase(row.getEmail())) {
@@ -143,17 +148,27 @@ public class AdminSignupService {
             throw Errors.conflict("EMAIL_ALREADY_REGISTERED", "An account with this email was created concurrently");
         }
 
-        User user = createAdminUser(row);
+        User user = createAdminUser(row, adminRole);
         row.setConsumedAt(Instant.now());
         otps.save(row);
 
         return authService.issueTokens(user, http);
     }
 
-    private User createAdminUser(AdminRegistrationOtp row) {
-        Role adminRole = roles.findByCode(RoleCode.ADMIN)
-                .orElseThrow(() -> new IllegalStateException("Role ADMIN missing — V2 seed migration did not run"));
+    /**
+     * Bootstrap is open only while the operator has enabled it AND no administrator exists yet.
+     * The flag alone must never be enough: left on by mistake it would let anyone with a
+     * mailbox become ADMIN, so the zero-admins check is the real backstop.
+     */
+    private void requireRegistrationOpen() {
+        boolean anyAdmin = users.countByRoleCodes(List.of(RoleCode.ADMIN, RoleCode.SUPER_ADMIN)) > 0;
+        if (!selfRegisterEnabled || anyAdmin) {
+            throw Errors.forbidden("ADMIN_REGISTER_CLOSED",
+                    "Admin self-registration is disabled; ask an existing administrator to create your account");
+        }
+    }
 
+    private User createAdminUser(AdminRegistrationOtp row, Role adminRole) {
         User user = User.builder()
                 .email(row.getEmail())
                 .phone(row.getPhone())

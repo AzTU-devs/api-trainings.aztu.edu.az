@@ -138,7 +138,9 @@ public class AuthController {
 
     @PostMapping("/logout")
     @Operation(summary = "Revoke the refresh token (request body or cookie) and clear the cookie",
-            security = @SecurityRequirement(name = "bearerAuth"))
+            description = "No access token required, so signing out still works after it has expired. " +
+                    "Only the refresh token presented is revoked.",
+            security = {})
     public ResponseEntity<Void> logout(@RequestBody(required = false) RefreshRequest req,
                                        HttpServletRequest http, HttpServletResponse response) {
         // Cleared unconditionally: signing out must leave nothing in the jar even when the token is
@@ -165,15 +167,18 @@ public class AuthController {
     }
 
     // ---------------------------------------------------------------------
-    // Admin self-registration (bootstrap-mode, no auth required for v1).
-    // Lock this down later by requiring an invite token from an existing
-    // SUPER_ADMIN before allowing /start.
+    // Admin self-registration: first-admin bootstrap only. AdminSignupService
+    // refuses both steps (403 ADMIN_REGISTER_CLOSED) unless
+    // app.security.admin-self-register-enabled=true AND no ADMIN/SUPER_ADMIN
+    // exists yet.
     // ---------------------------------------------------------------------
 
     @PostMapping("/admin/register/start")
     @Operation(
             summary = "Begin admin self-registration; sends an OTP to the supplied email",
-            description = "Open endpoint for v1 bootstrap. Submits admin details; an OTP is generated " +
+            description = "Bootstraps the first administrator. Allowed only while " +
+                    "app.security.admin-self-register-enabled=true and no ADMIN or SUPER_ADMIN exists; " +
+                    "otherwise 403 ADMIN_REGISTER_CLOSED. Submits admin details; an OTP is generated " +
                     "and (in production) emailed. Submit it to /admin/register/verify within 10 minutes.",
             security = {})
     public ResponseEntity<ApiResponse<AdminRegisterStartResponse>> adminStart(
@@ -186,7 +191,9 @@ public class AuthController {
     @PostMapping("/admin/register/verify")
     @Operation(
             summary = "Verify the OTP and create the admin account",
-            description = "On success creates a user with the ADMIN role and returns access + refresh tokens.",
+            description = "On success creates a user with the ADMIN role and returns access + refresh tokens. " +
+                    "Re-checks the same conditions as /start, so an OTP issued while bootstrap was open " +
+                    "cannot create an admin once it has closed.",
             security = {})
     public ResponseEntity<ApiResponse<AuthTokens>> adminVerify(
             @Valid @RequestBody AdminRegisterVerifyRequest req,

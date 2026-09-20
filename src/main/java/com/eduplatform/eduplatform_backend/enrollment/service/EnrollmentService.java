@@ -54,7 +54,9 @@ public class EnrollmentService {
         if (enrollments.existsByUserIdAndCourseId(userId, courseId)) {
             throw Errors.conflict("ALREADY_ENROLLED", "You are already enrolled in this course");
         }
-        if (source == EnrollmentSource.PURCHASE && !course.isFree()) {
+        // Only the FREE route is gated on price. An ADMIN_GRANT is meant to bypass payment, and a
+        // PURCHASE enrollment is created once the payment flow has taken the money.
+        if (source == EnrollmentSource.FREE && !course.isFree()) {
             throw Errors.unprocessable("PAYMENT_REQUIRED",
                     "This course is paid; enrol via the checkout flow instead");
         }

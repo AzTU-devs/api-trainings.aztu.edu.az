@@ -6,8 +6,12 @@ import com.eduplatform.eduplatform_backend.common.enums.CourseStatus;
 import com.eduplatform.eduplatform_backend.common.enums.CourseType;
 import com.eduplatform.eduplatform_backend.course.domain.Course;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -18,7 +22,8 @@ import java.util.Optional;
 import java.util.UUID;
 
 @Repository
-public interface CourseRepository extends JpaRepository<Course, UUID>, CourseCatalogRepository {
+public interface CourseRepository extends JpaRepository<Course, UUID>, JpaSpecificationExecutor<Course>,
+        CourseCatalogRepository {
 
     Optional<Course> findBySlug(String slug);
 
@@ -37,37 +42,37 @@ public interface CourseRepository extends JpaRepository<Course, UUID>, CourseCat
      * browser, so a search only ever looked at the ten rows already on screen — a tutor with
      * three pages of courses could not find one by name. This is the server-side counterpart.
      *
-     * <p>ILIKE rather than the catalog's full-text index: this searches a single tutor's own
-     * courses including drafts, where the row count is small and substring matching on a
-     * partial title ("mach" finding "Machine Learning") is more useful than stemmed word
-     * matching. The public catalog keeps its GIN/tsvector path.
+     * <p>A {@link Specification}, not a {@code @Query}:
+     * the static form had to guard the text filter with {@code (:q is null or ...)}, which
+     * binds a null String whenever there is no search. Hibernate 6 sends that null as
+     * {@code bytea}, Postgres rejects {@code lower(bytea)}, and every list without {@code q}
+     * — the dashboard's course list and approvals page — was a 500, in the page query and in
+     * the count query Spring Data derives from it. Here a predicate exists only when its
+     * filter is supplied, so neither the page query nor the count Spring Data derives from
+     * the same Specification ever binds a null.
      *
      * <p>Ordering is fixed here rather than left to the caller's {@code Pageable}, because
      * without a deterministic order Postgres may return a row on two different pages and omit
-     * another entirely. Callers pass page and size only.
+     * another entirely. Only the caller's page and size are used.
      *
-     * <p>{@code c.id} is the tiebreaker, and it is what actually makes the order
+     * <p>{@code id} is the tiebreaker, and it is what actually makes the order
      * deterministic: {@code createdAt} alone is not unique — seeded, bulk-imported or
      * scripted courses routinely share a timestamp — and for ties Postgres is free to order
      * the two differently between the page-0 and page-1 queries. One row then appears twice
      * and another never appears. {@code CourseCatalogRepositoryImpl} appends the same
      * tiebreaker for the same reason.
+     *
+     * @param status null for every status
+     * @param q      null or blank for no text filter
      */
-    @Query("""
-           select c from Course c
-           where c.tutor.user.id = :userId
-             and (:status is null or c.status = :status)
-             and (:q is null or (
-                    lower(c.title) like lower(concat('%', :q, '%'))
-                 or lower(coalesce(c.subtitle, '')) like lower(concat('%', :q, '%'))
-                 or lower(c.slug) like lower(concat('%', :q, '%'))
-             ))
-           order by c.createdAt desc, c.id desc
-           """)
-    Page<Course> searchTutorUserCourses(@Param("userId") UUID userId,
-                                        @Param("status") CourseStatus status,
-                                        @Param("q") String q,
-                                        Pageable pageable);
+    default Page<Course> searchTutorUserCourses(UUID userId, CourseStatus status, String q, Pageable pageable) {
+        Specification<Course> spec = TutorCourseSearch.of(userId, status, q);
+        if (pageable.isUnpaged()) {
+            return new PageImpl<>(findAll(spec, TutorCourseSearch.NEWEST_FIRST));
+        }
+        return findAll(spec, PageRequest.of(
+                pageable.getPageNumber(), pageable.getPageSize(), TutorCourseSearch.NEWEST_FIRST));
+    }
 
     Page<Course> findAllByStatusOrderByCreatedAtDesc(CourseStatus status, Pageable pageable);
 

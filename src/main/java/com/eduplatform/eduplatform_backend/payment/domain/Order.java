@@ -5,6 +5,7 @@ import com.eduplatform.eduplatform_backend.common.enums.OrderStatus;
 import com.eduplatform.eduplatform_backend.identity.domain.User;
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.BatchSize;
 import org.hibernate.annotations.SQLDelete;
 import org.hibernate.annotations.SQLRestriction;
 
@@ -61,6 +62,7 @@ public class Order extends SoftDeletable {
     private Instant paidAt;
 
     @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
+    @BatchSize(size = 50)
     @Builder.Default
     private Set<OrderItem> items = new HashSet<>();
 

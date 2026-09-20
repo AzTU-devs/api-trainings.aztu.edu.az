@@ -7,33 +7,21 @@ public final class HttpMeta {
 
     public static final String REQUEST_ID_ATTR = "ep.requestId";
 
-    /**
-     * Whether to trust client-supplied X-Forwarded-For / X-Real-IP headers. Only enable this
-     * ({@code app.security.trust-forward-headers=true}) when the app sits behind a trusted proxy
-     * that sets these headers — otherwise clients can spoof their source IP (defeating the IP
-     * blocklist and forging audit/security records). Configured once at startup.
-     */
-    private static volatile boolean trustForwardHeaders = false;
-
     private HttpMeta() {}
 
-    public static void setTrustForwardHeaders(boolean value) {
-        trustForwardHeaders = value;
-    }
-
-    /** Client IP. Honors X-Forwarded-For/X-Real-IP only when forward headers are trusted; else the socket address. */
+    /**
+     * Client IP, exactly as Tomcat's RemoteIpValve resolved it
+     * ({@code server.forward-headers-strategy=native} in application.properties).
+     *
+     * <p>Deliberately parses no header itself. The valve consults X-Forwarded-For only when the
+     * connection comes from a trusted internal proxy, and then reads it right to left, stopping at
+     * the first hop that is not one. This method used to take the leftmost entry instead, and the
+     * API vhost's {@code $proxy_add_x_forwarded_for} appends to whatever the client sent, so the
+     * leftmost entry was the client's own choice. The auth rate limiter, the IP blocklist and audit
+     * attribution all key on this value.
+     */
     public static String clientIp(HttpServletRequest request) {
-        if (request == null) return null;
-        if (trustForwardHeaders) {
-            String xff = request.getHeader("X-Forwarded-For");
-            if (xff != null && !xff.isBlank()) {
-                int comma = xff.indexOf(',');
-                return (comma > 0 ? xff.substring(0, comma) : xff).trim();
-            }
-            String real = request.getHeader("X-Real-IP");
-            if (real != null && !real.isBlank()) return real.trim();
-        }
-        return request.getRemoteAddr();
+        return request == null ? null : request.getRemoteAddr();
     }
 
     public static String userAgent(HttpServletRequest request) {

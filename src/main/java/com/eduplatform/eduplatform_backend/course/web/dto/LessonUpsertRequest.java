@@ -8,6 +8,14 @@ import jakarta.validation.constraints.Size;
 
 import java.util.UUID;
 
+/**
+ * Create or fully replace a lesson — on update a null field clears it, unlike the course's
+ * partial update.
+ *
+ * <p>{@code videoMediaId} is the lesson's one file whatever its content type, not only a video:
+ * the document of a PDF lesson, an optional attachment on the other types. Which kinds it
+ * accepts follows {@code contentType}; see {@code CourseMediaValidator.MediaField#lessonMaterial}.
+ */
 public record LessonUpsertRequest(
         @NotBlank @Size(max = 200) String title,
         @Size(max = 5000) String description,

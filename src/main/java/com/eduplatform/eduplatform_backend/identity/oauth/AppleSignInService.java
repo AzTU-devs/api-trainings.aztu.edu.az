@@ -6,10 +6,8 @@ import com.eduplatform.eduplatform_backend.common.error.Errors;
 import com.eduplatform.eduplatform_backend.common.security.TokenHasher;
 import com.eduplatform.eduplatform_backend.common.security.config.OAuthProperties;
 import com.eduplatform.eduplatform_backend.identity.domain.OAuthAuthState;
-import com.eduplatform.eduplatform_backend.identity.domain.User;
 import com.eduplatform.eduplatform_backend.identity.oauth.OAuthAccountService.ProviderProfile;
 import com.eduplatform.eduplatform_backend.identity.repo.OAuthAuthStateRepository;
-import com.eduplatform.eduplatform_backend.identity.service.AuthService;
 import com.eduplatform.eduplatform_backend.identity.web.dto.AuthTokens;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Value;
@@ -51,7 +49,6 @@ public class AppleSignInService {
     private final AppleClientSecretService secretService;
     private final OAuthAuthStateRepository stateRepo;
     private final OAuthAccountService accountService;
-    private final AuthService authService;
     private final String publicFrontendUrl;
     private final RestClient http = RestClient.create();
     private final JwtDecoder appleJwtDecoder;
@@ -60,13 +57,11 @@ public class AppleSignInService {
                               AppleClientSecretService secretService,
                               OAuthAuthStateRepository stateRepo,
                               OAuthAccountService accountService,
-                              AuthService authService,
                               @Value("${app.frontend.public-url}") String publicFrontendUrl) {
         this.cfg = props.apple();
         this.secretService = secretService;
         this.stateRepo = stateRepo;
         this.accountService = accountService;
-        this.authService = authService;
         this.publicFrontendUrl = publicFrontendUrl;
         this.appleJwtDecoder = NimbusJwtDecoder.withJwkSetUri(JWKS_URL).build();
     }
@@ -130,9 +125,7 @@ public class AppleSignInService {
         }
 
         Jwt jwt = decodeAndVerify(idToken, row.getNonce());
-        ProviderProfile profile = toProfile(jwt);
-        User user = accountService.resolveOrCreate(profile);
-        return authService.issueTokens(user, req);
+        return accountService.signIn(toProfile(jwt), req);
     }
 
     public String publicFrontendUrl() { return publicFrontendUrl; }
@@ -180,8 +173,10 @@ public class AppleSignInService {
     private static ProviderProfile toProfile(Jwt jwt) {
         String sub = jwt.getSubject();
         String email = jwt.getClaim("email");
-        Boolean verified = jwt.getClaim("email_verified");
-        Boolean privateEmail = jwt.getClaim("is_private_email");
+        // Apple documents both claims as either a JSON boolean or the string "true"/"false";
+        // getClaimAsBoolean accepts both, where a plain Boolean read would fail on the string.
+        Boolean verified = jwt.getClaimAsBoolean("email_verified");
+        Boolean privateEmail = jwt.getClaimAsBoolean("is_private_email");
 
         return new ProviderProfile(
                 AuthProvider.APPLE, sub, email,

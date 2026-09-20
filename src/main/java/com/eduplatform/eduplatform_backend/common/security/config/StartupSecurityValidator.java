@@ -35,6 +35,8 @@ import java.util.Map;
  *   <li>The Flyway path excludes {@code db/dev}, which seeds login-ready ADMIN and
  *       SUPER_ADMIN accounts sharing the password {@code Password123!}.</li>
  * </ul>
+ * It also warns about settings that start fine but are probably not what the operator meant
+ * (localhost CORS origins, the retired {@code TRUST_FORWARD_HEADERS}).
  */
 @Component
 public class StartupSecurityValidator implements BeanFactoryPostProcessor {
@@ -76,6 +78,7 @@ public class StartupSecurityValidator implements BeanFactoryPostProcessor {
         checkJwtSecret(resolve("app.security.jwt.access-secret"));
         checkFlywayLocations(resolve("spring.flyway.locations"));
         warnOnLocalhostCors(resolve("app.cors.allowed-origins"));
+        noteRetiredForwardHeaderFlag();
     }
 
     /** Reports every missing setting at once — one redeploy per fix is a slow way to learn. */
@@ -129,6 +132,21 @@ public class StartupSecurityValidator implements BeanFactoryPostProcessor {
         if (corsOrigins != null && corsOrigins.contains("localhost")) {
             log.warn("app.cors.allowed-origins still contains a localhost entry outside the dev profile: {}. "
                     + "Set CORS_ALLOWED_ORIGINS to the real frontend origins.", corsOrigins);
+        }
+    }
+
+    /**
+     * Existing deployments carry {@code TRUST_FORWARD_HEADERS} in their .env, and nothing reads it
+     * any more, so it must not fail startup. It is still worth one line: an operator who set it to
+     * {@code false} to stop trusting forwarded headers would otherwise believe it still does
+     * something.
+     */
+    private void noteRetiredForwardHeaderFlag() {
+        if (StringUtils.hasText(resolve("TRUST_FORWARD_HEADERS"))
+                || StringUtils.hasText(resolve("app.security.trust-forward-headers"))) {
+            log.info("TRUST_FORWARD_HEADERS is no longer used and can be removed. The client IP now comes from "
+                    + "Tomcat (server.forward-headers-strategy=native), which honours X-Forwarded-For and "
+                    + "X-Forwarded-Proto only from loopback and private-network proxies.");
         }
     }
 

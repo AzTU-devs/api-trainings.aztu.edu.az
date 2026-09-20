@@ -100,10 +100,15 @@ sudo ufw deny 8081/tcp
 sudo ufw enable
 ```
 
-Closing 8080 is a security control, not tidiness. The API runs with
-`TRUST_FORWARD_HEADERS=true`, so it believes the `X-Forwarded-For` it is given.
-If 8080 is reachable directly, any caller can forge that header and walk past the
-rate limiter, the IP blocklist and audit attribution in one request.
+Closing 8080 is a security control, not tidiness. The API believes
+`X-Forwarded-For` from any peer with a loopback or private address, because it
+treats those as its own proxies (Tomcat's `RemoteIpValve`; see
+[Client IP](../../DEPLOY.md#client-ip) in the API's DEPLOY.md). On a host with a
+private address — as a campus server usually has — any machine on the same
+network that could reach 8080 would therefore be believed: it could name any
+client IP it liked and walk past the rate limiter, the IP blocklist and audit
+attribution in one request. Anyone reaching 8080 would also skip TLS and the
+vhost's `/actuator` restriction from step 6.
 
 `ufw deny` works here **because** the compose files use host networking. A
 published Docker port (`ports:`) would insert its own rules ahead of UFW's INPUT
@@ -157,6 +162,12 @@ Create one vhost per hostname. `/etc/nginx/sites-available/trainings`:
 # prefers it precisely for that reason — without it every visitor's auth calls
 # share a single rate-limit bucket, and the 11th login site-wide in a minute
 # starts returning 429.
+# $proxy_add_x_forwarded_for appends $remote_addr to whatever X-Forwarded-For the
+# client sent, and that is safe for the API: its forwarded-header handling is
+# Tomcat's RemoteIpValve (server.forward-headers-strategy=native), which reads the
+# list right to left, skips only trusted internal proxies and stops at the first
+# address that is not one — the $remote_addr appended here — so a prepended,
+# forged entry is never reached. The API ignores X-Real-IP and Forwarded.
 proxy_set_header Host              $host;
 proxy_set_header X-Real-IP         $remote_addr;
 proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
@@ -193,6 +204,18 @@ server {
 
     location / { proxy_pass http://127.0.0.1:8080; }
 
+    # Actuator is for this host only, so health and anything re-exposed later
+    # (prometheus) stay off the internet whatever the app's exposure list says.
+    # No trailing slash: the bare /actuator index is covered too, and ^~ stops a
+    # regex location added later from taking these paths over. The container
+    # HEALTHCHECK and the compose healthcheck call 127.0.0.1:8080 directly, not
+    # through this vhost, so they are unaffected.
+    location ^~ /actuator {
+        allow 127.0.0.1;
+        deny  all;
+        proxy_pass http://127.0.0.1:8080;
+    }
+
     # STOMP notifications. The endpoint is exactly /ws — this must stay in step
     # with NEXT_PUBLIC_WS_URL in the public site's .env.
     location /ws {
@@ -200,6 +223,12 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Upgrade    $http_upgrade;
         proxy_set_header Connection "upgrade";
+        # nginx inherits proxy_set_header only into a location that sets none of
+        # its own, so the two lines above would otherwise drop the shared ones.
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
         proxy_read_timeout 3600s;
     }
 }
@@ -211,6 +240,10 @@ sudo nginx -t
 sudo certbot --nginx -d trainings.aztu.edu.az -d dashboard-trainings.aztu.edu.az -d api-trainings.aztu.edu.az
 sudo systemctl reload nginx
 ```
+
+How the API turns these headers into a client IP — and the one case, on-campus
+clients with private addresses, where a forged entry can still get through — is
+under "Client IP" in the API's [DEPLOY.md](../../DEPLOY.md#client-ip).
 
 **TLS is not optional here.** The portal's refresh-token cookie is `Secure`, so
 over plain HTTP the browser discards it: sign-in appears to work, then every admin
@@ -256,25 +289,55 @@ sed -i 's/^ADMIN_SELF_REGISTER=true/ADMIN_SELF_REGISTER=false/' .env
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-Self-registration is refused automatically once any `ADMIN`/`SUPER_ADMIN` exists,
-so this is belt and braces rather than the only guard.
+The API accepts an admin self-registration only while **both** hold:
+`ADMIN_SELF_REGISTER=true` and no `ADMIN`/`SUPER_ADMIN` account exists yet.
+Anything else is `403 ADMIN_REGISTER_CLOSED`. So the zero-admins check is the
+backstop — once your account exists, a flag left on by mistake cannot mint a second
+admin — and setting the flag back is what closes the door outright. Until your
+account exists, nothing but the flag stands between the endpoint and whoever
+reaches it first, so run the three steps back to back.
+
+### Promote the first SUPER_ADMIN
+
+The bootstrap account is an `ADMIN`. Only a `SUPER_ADMIN` can grant or revoke
+`SUPER_ADMIN` through the API (`403 ROLE_ESCALATION_FORBIDDEN`), and nobody can
+change their own roles (`403 SELF_ROLE_CHANGE_FORBIDDEN`), so the first one has to
+be granted in the database, once:
+
+```bash
+sudo -u postgres psql -d eduplatform <<'SQL'
+INSERT INTO user_roles (user_id, role_id)
+SELECT u.id, r.id FROM users u JOIN roles r ON r.code = 'SUPER_ADMIN'
+WHERE u.email = 'you@aztu.edu.az'
+ON CONFLICT DO NOTHING;
+SQL
+```
+
+`INSERT 0 1` means it worked; `INSERT 0 0` means the email did not match (or the
+account already had the role). Roles travel in the access token, so sign out and
+back in to pick it up. Any further `SUPER_ADMIN` is then granted from the admin
+portal by this one.
 
 ## 9. Verify
 
 Check behaviour, not just that containers are up.
 
 ```bash
-# Health
-curl -fsS https://api-trainings.aztu.edu.az/actuator/health/readiness
+# Health. The API's actuator is loopback-only (step 6), so check it on the host
+# itself; this is also the URL to give an uptime monitor running there.
+curl -fsS http://127.0.0.1:8080/actuator/health/readiness
 curl -fsS https://trainings.aztu.edu.az/api/health
 curl -fsS https://dashboard-trainings.aztu.edu.az/healthz
 
 # Public catalogue, with filters applied server-side
 curl -fsS 'https://api-trainings.aztu.edu.az/api/public/courses?type=ONLINE&level=BEGINNER&size=5'
 
-# Swagger and metrics must NOT be public
+# Swagger and actuator must NOT be public. Run these from a machine other than
+# the host. A 200 for health or a 404 for prometheus means the vhost's /actuator
+# location is missing — only the app's exposure list is keeping prometheus closed.
 curl -o /dev/null -w '%{http_code}\n' https://api-trainings.aztu.edu.az/swagger-ui.html   # expect 404
-curl -o /dev/null -w '%{http_code}\n' https://api-trainings.aztu.edu.az/actuator/prometheus # expect 404
+curl -o /dev/null -w '%{http_code}\n' https://api-trainings.aztu.edu.az/actuator/health     # expect 403
+curl -o /dev/null -w '%{http_code}\n' https://api-trainings.aztu.edu.az/actuator/prometheus # expect 403
 
 # Security headers on the public site
 curl -sI https://trainings.aztu.edu.az | grep -iE 'content-security-policy|strict-transport'
@@ -296,9 +359,12 @@ Then in a browser, as the admin you just created:
 - sign in, wait past the 15-minute access-token expiry, and confirm you are
   **still** signed in — this is the cookie-refresh path, and the thing TLS
   misconfiguration breaks
-- create a course, upload a cover image, upload a lesson video over 100 MB
+- create a course, upload a cover image, upload a lesson video over 100 MB;
+  reload the course and confirm the cover is still set — an upload that
+  succeeds is not proof the course kept it
 - confirm an `.svg` and a `.js` are refused by the file picker
-- search your own courses from the header and from the course list
+- open the course list and the approvals page with no search term, then search
+  your own courses from the header and from the course list
 - as a student on the public site, register, enrol in a free course, open a lesson
 
 ## 10. Redeploy
@@ -315,6 +381,11 @@ in-flight requests finish.
 Restart is enough only for the API and for the public site's server-only values
 (`INTERNAL_API_URL`, `REVALIDATE_SECRET`). Anything `NEXT_PUBLIC_*` or `VITE_*`
 requires `--build`.
+
+The host nginx config from §6 lives outside all three repos, so `git pull` never
+updates it. When §6 changes — as it did to add the `/actuator` restriction and the
+forwarded headers on `/ws` — edit `/etc/nginx/sites-available/trainings` by hand,
+then `sudo nginx -t && sudo systemctl reload nginx`.
 
 ## 11. Rollback
 
@@ -340,9 +411,13 @@ deploy (DB_SETUP.md §9) and redeploy the old code against it. Take that dump
 - [ ] TLS live on all three hostnames, HTTP redirects to HTTPS
 - [ ] Host nginx sets `X-Real-IP`, `X-Forwarded-For` and `X-Forwarded-Proto`
 - [ ] `client_max_body_size 550m` on the API vhost
+- [ ] API vhost refuses `/actuator` from anywhere but `127.0.0.1` (403 from outside)
+- [ ] Uptime monitors use `/actuator/health/readiness`, not the aggregate
+      `/actuator/health`
 - [ ] SMTP filled in and `MAIL_ENABLED=true` (otherwise password reset and email
       verification silently do nothing for real users)
-- [ ] First admin created, `ADMIN_SELF_REGISTER=false` again
+- [ ] First admin created, `ADMIN_SELF_REGISTER=false` again, and promoted to
+      `SUPER_ADMIN` (§8)
 - [ ] `SWAGGER_ENABLED=false`, `/actuator/prometheus` not publicly reachable
 - [ ] Nightly `pg_dump` **and** `/opt/uploads` backup scheduled, restore drilled once
 - [ ] `PAYMENTS_ENABLED=false` while no payment provider is integrated

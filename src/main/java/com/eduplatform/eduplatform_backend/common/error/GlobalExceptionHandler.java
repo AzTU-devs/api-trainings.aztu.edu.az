@@ -7,16 +7,22 @@ import jakarta.validation.ConstraintViolationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.InvalidDataAccessApiUsageException;
 import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.data.mapping.PropertyReferenceException;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.validation.FieldError;
+import org.springframework.web.HttpMediaTypeNotAcceptableException;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
@@ -24,10 +30,14 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 // specific @ExceptionHandler, so the size-specific message wins over the generic one.
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.multipart.MultipartException;
+import org.springframework.web.multipart.support.MissingServletRequestPartException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.NoSuchElementException;
+import java.util.Set;
 
 /**
  * Single source of truth for HTTP error responses.
@@ -77,6 +87,79 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiError> handleMethod(HttpRequestMethodNotSupportedException ex, HttpServletRequest req) {
         return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED).body(
                 ApiError.of(405, "METHOD_NOT_ALLOWED", ex.getMessage(), req.getRequestURI()));
+    }
+
+    // The four handlers below cover request-shape errors that Spring raises before any
+    // controller code runs. Because this advice also handles Exception, Spring's own resolver
+    // never sees them, so without explicit handlers each one became a 500 plus an ERROR stack
+    // trace that any anonymous caller could trigger at will: GET /api/public/courses/search
+    // without q, or POST /api/auth/login sent as text/plain. They are the client's mistake, so
+    // they are not logged at all.
+
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    public ResponseEntity<ApiError> handleMissingParameter(MissingServletRequestParameterException ex,
+                                                           HttpServletRequest req) {
+        return missingParameter("parameter '" + ex.getParameterName() + "'", req);
+    }
+
+    /** A multipart request without a part that a {@code @RequestPart} or required {@code MultipartFile} names. */
+    @ExceptionHandler(MissingServletRequestPartException.class)
+    public ResponseEntity<ApiError> handleMissingPart(MissingServletRequestPartException ex, HttpServletRequest req) {
+        return missingParameter("part '" + ex.getRequestPartName() + "'", req);
+    }
+
+    @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
+    public ResponseEntity<ApiError> handleUnsupportedMediaType(HttpMediaTypeNotSupportedException ex,
+                                                               HttpServletRequest req) {
+        // getContentType() is null when the header could not be parsed at all.
+        String sent = ex.getContentType() == null
+                ? "The Content-Type header is malformed"
+                : "Content type '" + ex.getContentType() + "' is not supported here";
+        String supported = ex.getSupportedMediaTypes().isEmpty()
+                ? ""
+                : "; send " + MediaType.toString(ex.getSupportedMediaTypes());
+        // ex.getHeaders() carries Accept (and Accept-Patch for PATCH) listing what the endpoint
+        // does take, the same header Spring's default resolver would have sent with a 415.
+        return ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
+                .headers(ex.getHeaders())
+                .body(ApiError.of(415, "UNSUPPORTED_MEDIA_TYPE", sent + supported, req.getRequestURI()));
+    }
+
+    @ExceptionHandler(HttpMediaTypeNotAcceptableException.class)
+    public ResponseEntity<ApiError> handleNotAcceptable(HttpMediaTypeNotAcceptableException ex,
+                                                        HttpServletRequest req) {
+        // The Content-Type is fixed rather than negotiated. This client has just said it does not
+        // accept JSON, so negotiating this body would fail the same way, and Spring would then
+        // discard the handler's response and fall back to a bare sendError(406). RFC 9110 allows
+        // a 406 to carry a representation the client did not ask for.
+        return ResponseEntity.status(HttpStatus.NOT_ACCEPTABLE)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(ApiError.of(406, "NOT_ACCEPTABLE",
+                        "This endpoint cannot respond in any media type listed in the Accept header",
+                        req.getRequestURI()));
+    }
+
+    /**
+     * {@code ?sort=} names an entity property that Spring Data resolves only when the query runs,
+     * so on a {@code Pageable} endpoint with no sort whitelist an unknown name surfaces from the
+     * repository. It is the caller's mistake, repeatable anonymously at will, so it gets the 400
+     * the catalogue's own sort check already returns rather than a 500 and an ERROR stack trace.
+     */
+    @ExceptionHandler(PropertyReferenceException.class)
+    public ResponseEntity<ApiError> handleUnknownProperty(PropertyReferenceException ex, HttpServletRequest req) {
+        return invalidSortProperty(ex, req);
+    }
+
+    /**
+     * Persistence exception translation can hand the same unknown sort property back wrapped in
+     * this type. Only that wrapped form is the client's error; any other misuse of the
+     * data-access API is a defect in our own code and keeps the 500 and the ERROR log.
+     */
+    @ExceptionHandler(InvalidDataAccessApiUsageException.class)
+    public ResponseEntity<ApiError> handleDataAccessMisuse(InvalidDataAccessApiUsageException ex,
+                                                           HttpServletRequest req) {
+        PropertyReferenceException unknownProperty = propertyReferenceCause(ex);
+        return unknownProperty != null ? invalidSortProperty(unknownProperty, req) : handleAny(ex, req);
     }
 
     @ExceptionHandler({NoSuchElementException.class})
@@ -162,6 +245,31 @@ public class GlobalExceptionHandler {
         log.error("Unhandled exception", ex);
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
                 ApiError.of(500, "INTERNAL_ERROR", "An unexpected error occurred", req.getRequestURI()));
+    }
+
+    private static ResponseEntity<ApiError> invalidSortProperty(PropertyReferenceException ex,
+                                                                HttpServletRequest req) {
+        // DEBUG, not ERROR: a Sort built in our own code with a bad name lands here too, and this
+        // line is what tells that bug apart from a client typo.
+        log.debug("Rejected an unknown sort property", ex);
+        // Only the property name is echoed: the exception's own message names the entity class.
+        return ResponseEntity.badRequest().body(
+                ApiError.of(400, "INVALID_SORT_PROPERTY",
+                        "Results cannot be sorted by '" + ex.getPropertyName() + "'", req.getRequestURI()));
+    }
+
+    private static PropertyReferenceException propertyReferenceCause(Throwable ex) {
+        // Identity-tracked because nothing stops a cause chain from looping back on itself.
+        Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (Throwable t = ex.getCause(); t != null && seen.add(t); t = t.getCause()) {
+            if (t instanceof PropertyReferenceException pre) return pre;
+        }
+        return null;
+    }
+
+    private static ResponseEntity<ApiError> missingParameter(String what, HttpServletRequest req) {
+        return ResponseEntity.badRequest().body(
+                ApiError.of(400, "MISSING_PARAMETER", "Required " + what + " is missing", req.getRequestURI()));
     }
 
     private static FieldErrorItem toItem(FieldError fe) {

@@ -86,7 +86,9 @@ public class MediaService {
                 .metadata(metadataOf(type, file.getOriginalFilename()))
                 .build();
         m.setId(UUID.randomUUID());
-        media.save(m);
+        // With a hand-assigned id, save() merges: the auditing listener stamps createdAt on the
+        // managed copy it returns and leaves m untouched, so the response is built from the copy.
+        m = media.save(m);
         return mapper.toDto(m);
     }
 

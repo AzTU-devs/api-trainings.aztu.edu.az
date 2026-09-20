@@ -137,6 +137,9 @@ public class RoomBookingService {
         audit.record(decision == BookingDecision.APPROVED ? AuditService.Actions.APPROVE : AuditService.Actions.REJECT,
                 "ROOM_BOOKING", booking.getId(), null,
                 AuditService.snapshot("status", booking.getStatus().name(), "note", note));
+        // findById left room as a proxy. Without this the controller's mapping fails after
+        // the decision has already committed, and the admin's retry gets a 409.
+        initForMapping(booking);
         return booking;
     }
 }

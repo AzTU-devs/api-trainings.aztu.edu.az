@@ -55,7 +55,7 @@ public class CourseTutorController {
     public ResponseEntity<ApiResponse<CourseDto>> create(@Valid @RequestBody CreateCourseRequest req,
                                                          @CurrentUser AuthenticatedPrincipal me) {
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(ApiResponse.ok(mapper.toDto(service.createByTutor(me.userId(), req))));
+                .body(ApiResponse.ok(mapper.toDto(service.createByTutor(me, req))));
     }
 
     @PatchMapping("/{id}")
@@ -64,7 +64,7 @@ public class CourseTutorController {
     public ApiResponse<CourseDto> update(@PathVariable UUID id,
                                          @Valid @RequestBody UpdateCourseRequest req,
                                          @CurrentUser AuthenticatedPrincipal me) {
-        return ApiResponse.ok(mapper.toDto(service.updateByTutor(me.userId(), id, req)));
+        return ApiResponse.ok(mapper.toDto(service.updateByTutor(me, id, req)));
     }
 
     @PostMapping("/{id}/submit")

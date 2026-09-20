@@ -68,7 +68,8 @@ public class AuthService {
 
     /**
      * Creates an ACTIVE user with the USER role from an already-bcrypt-hashed password.
-     * Used by OTP signup flows that hashed the password at the "start" step.
+     * Used by self-registration and by the OTP signup flows that hashed the password at the
+     * "start" step. Returns the managed instance, so callers see the persisted role link.
      */
     @Transactional
     public User createUserWithUserRolePreHashed(String email, String passwordHash, String firstName,
@@ -89,16 +90,18 @@ public class AuthService {
                 .locale(locale == null ? "en" : locale)
                 .build();
         u.setId(UUID.randomUUID());
-        users.save(u);
 
-        UserRole link = UserRole.builder()
+        // The link must be on the collection BEFORE save(). The hand-assigned id makes save()
+        // a merge that returns a managed copy; a link added to `u` afterwards lands on the
+        // detached original and is never written, leaving the account with no role at all.
+        // cascade=ALL on User.userRoles carries the link through the merge.
+        u.getUserRoles().add(UserRole.builder()
                 .id(new UserRoleId(u.getId(), userRole.getId()))
                 .user(u)
                 .role(userRole)
                 .grantedAt(Instant.now())
-                .build();
-        u.getUserRoles().add(link);
-        return u;
+                .build());
+        return users.save(u);
     }
 
     @Transactional
@@ -128,7 +131,11 @@ public class AuthService {
         return issueTokens(user, http);
     }
 
-    @Transactional
+    // Reuse detection revokes the family and then fails the request. That revocation is written in
+    // this transaction, so it has to commit despite the exception — hence noRollbackFor. Doing it in
+    // a nested transaction instead needed a second pooled connection per request, which let
+    // concurrent replays exhaust the pool. See RefreshTokenService.ReuseDetected.
+    @Transactional(noRollbackFor = RefreshTokenService.ReuseDetected.class)
     public AuthTokens refresh(String refreshToken, HttpServletRequest http) {
         RefreshTokenService.Rotated rotated = refreshService.rotate(refreshToken, http);
         AuthTokens base = buildAccessFor(rotated.user());

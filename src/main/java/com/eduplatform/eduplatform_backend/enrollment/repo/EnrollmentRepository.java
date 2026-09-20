@@ -5,6 +5,7 @@ import com.eduplatform.eduplatform_backend.common.enums.EnrollmentStatus;
 import com.eduplatform.eduplatform_backend.enrollment.domain.Enrollment;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -22,6 +23,14 @@ public interface EnrollmentRepository extends JpaRepository<Enrollment, UUID> {
 
     boolean existsByUserIdAndCourseId(UUID userId, UUID courseId);
 
+    /**
+     * Brings each enrollment's course back in the same select, because EnrollmentMapper reads
+     * {@code course.title} after the transaction has closed (open-in-view=false). The course's
+     * online/offline details are inverse one-to-ones, which Hibernate loads eagerly with two
+     * extra selects per course unless they are joined here too. All of these are to-one joins,
+     * so the page is still limited in SQL.
+     */
+    @EntityGraph(attributePaths = {"course", "course.onlineDetails", "course.offlineDetails"})
     Page<Enrollment> findAllByUserId(UUID userId, Pageable pageable);
 
     Page<Enrollment> findAllByCourseId(UUID courseId, Pageable pageable);
