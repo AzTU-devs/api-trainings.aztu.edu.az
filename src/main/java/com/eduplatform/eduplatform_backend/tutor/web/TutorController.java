@@ -12,6 +12,7 @@ import com.eduplatform.eduplatform_backend.tutor.web.dto.ApprovalDecisionRequest
 import com.eduplatform.eduplatform_backend.tutor.web.dto.TutorApplyRequest;
 import com.eduplatform.eduplatform_backend.tutor.web.dto.TutorProfileDto;
 import com.eduplatform.eduplatform_backend.tutor.web.dto.TutorStudentDto;
+import com.eduplatform.eduplatform_backend.tutor.web.dto.UpdateTutorProfileRequest;
 import com.eduplatform.eduplatform_backend.tutor.web.mapper.TutorMapper;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -60,6 +61,18 @@ public class TutorController {
     @Operation(summary = "Get my tutor profile")
     public ApiResponse<TutorProfileDto> me(@CurrentUser AuthenticatedPrincipal me) {
         return ApiResponse.ok(mapper.toDto(service.myProfile(me.userId())));
+    }
+
+    @PatchMapping("/me")
+    @PreAuthorize("hasAuthority('tutor:manage_self')")
+    @Operation(summary = "Edit my tutor profile (partial)",
+            description = "Merge-patch: an absent property is left unchanged; null, or a blank string for "
+                    + "text, clears it. expertiseCategoryIds, when sent, replaces the areas and must not be "
+                    + "empty. avatarMediaId must be a READY image you uploaded, or the one already set. "
+                    + "Approval status cannot be changed here.")
+    public ApiResponse<TutorProfileDto> updateMe(@Valid @RequestBody UpdateTutorProfileRequest req,
+                                                 @CurrentUser AuthenticatedPrincipal me) {
+        return ApiResponse.ok(mapper.toDto(service.updateOwnProfile(me, req)));
     }
 
     @GetMapping("/students")

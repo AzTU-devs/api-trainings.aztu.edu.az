@@ -13,9 +13,10 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.UUID;
 
 /**
- * Anonymous read of public media. This is where course thumbnails and trailers are served from:
- * the marketing site embeds them as plain relative URLs, so they have to work with no token at
- * all, and a media id that is not public must look exactly like one that does not exist.
+ * Anonymous read of public media. This is where course thumbnails and trailers, and approved
+ * experts' portraits, are served from: the marketing site embeds them as plain relative URLs, so
+ * they have to work with no token at all, and a media id that is not public must look exactly
+ * like one that does not exist.
  */
 @RestController
 @RequestMapping("/api/public/media")
@@ -35,7 +36,8 @@ public class MediaPublicController {
     }
 
     @GetMapping("/{id}/content")
-    @Operation(summary = "Stream a public media asset (course thumbnail or trailer)", security = {})
+    @Operation(summary = "Stream a public media asset (course thumbnail or trailer, approved expert's avatar)",
+            security = {})
     public ResponseEntity<Resource> content(@PathVariable UUID id) {
         return MediaResponses.stream(service.loadPublicContent(id), PUBLIC_CACHE);
     }

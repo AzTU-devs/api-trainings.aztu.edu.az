@@ -4,6 +4,7 @@ import com.eduplatform.eduplatform_backend.catalog.domain.Category;
 import com.eduplatform.eduplatform_backend.common.domain.SoftDeletable;
 import com.eduplatform.eduplatform_backend.common.enums.TutorApprovalStatus;
 import com.eduplatform.eduplatform_backend.identity.domain.User;
+import com.eduplatform.eduplatform_backend.media.domain.MediaFile;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.BatchSize;
@@ -45,6 +46,44 @@ public class TutorProfile extends SoftDeletable {
 
     @Column(name = "linkedin_url", length = 255)
     private String linkedinUrl;
+
+    /**
+     * The expert's portrait, modelled like a course's thumbnail. Lazy because nothing reads more
+     * than its id, which a proxy answers without a select.
+     */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "avatar_media_id")
+    private MediaFile avatar;
+
+    @Column(name = "academic_title", length = 120)
+    private String academicTitle;
+
+    @Column(name = "department", length = 160)
+    private String department;
+
+    /** Free text, one qualification per line. */
+    @Column(name = "education", columnDefinition = "text")
+    private String education;
+
+    /** Free text, one certification per line. */
+    @Column(name = "certifications", columnDefinition = "text")
+    private String certifications;
+
+    @Column(name = "languages", length = 255)
+    private String languages;
+
+    @Column(name = "google_scholar_url", length = 255)
+    private String googleScholarUrl;
+
+    @Column(name = "research_gate_url", length = 255)
+    private String researchGateUrl;
+
+    /** The bare iD, 0000-0000-0000-000X, not the orcid.org URL. */
+    @Column(name = "orcid", length = 255)
+    private String orcid;
+
+    @Column(name = "github_url", length = 255)
+    private String githubUrl;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "approval_status", nullable = false, length = 20)

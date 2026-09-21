@@ -13,6 +13,7 @@ import com.eduplatform.eduplatform_backend.media.upload.AllowedMediaType;
 import com.eduplatform.eduplatform_backend.media.upload.UploadPolicy;
 import com.eduplatform.eduplatform_backend.media.web.dto.MediaFileDto;
 import com.eduplatform.eduplatform_backend.media.web.mapper.MediaMapper;
+import com.eduplatform.eduplatform_backend.tutor.repo.TutorProfileRepository;
 import org.springframework.core.io.Resource;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
@@ -40,15 +41,18 @@ public class MediaService {
     private final MediaMapper mapper;
     private final LessonRepository lessons;
     private final CourseRepository courses;
+    private final TutorProfileRepository tutors;
     private final UploadPolicy policy;
 
     public MediaService(MediaFileRepository media, StorageService storage, MediaMapper mapper,
-                        LessonRepository lessons, CourseRepository courses, UploadPolicy policy) {
+                        LessonRepository lessons, CourseRepository courses, TutorProfileRepository tutors,
+                        UploadPolicy policy) {
         this.media = media;
         this.storage = storage;
         this.mapper = mapper;
         this.lessons = lessons;
         this.courses = courses;
+        this.tutors = tutors;
         this.policy = policy;
     }
 
@@ -103,8 +107,10 @@ public class MediaService {
     }
 
     /**
-     * Anonymous read of a publicly visible asset — course thumbnails and trailers, which the
-     * marketing site embeds in {@code <img>}/{@code <video>} tags.
+     * Anonymous read of a publicly visible asset — course thumbnails and trailers, and the
+     * portraits of approved experts, which the marketing site embeds in {@code <img>}/{@code <video>}
+     * tags. A portrait is public only while its profile is APPROVED: an applicant who is pending,
+     * rejected or suspended has not been put in front of the public, and neither has their photo.
      *
      * <p>Anything that is not public is a 404, never a 401 or 403: an auth challenge on a tag the
      * browser loads by itself is useless at best (and, over Basic-style challenges, a credential
@@ -113,14 +119,17 @@ public class MediaService {
     @Transactional(readOnly = true)
     public Content loadPublicContent(UUID id) {
         MediaFile m = media.findById(id)
-                .filter(f -> f.getVisibility() == MediaVisibility.PUBLIC || courses.isPublishedCourseAsset(f.getId()))
+                .filter(f -> f.getVisibility() == MediaVisibility.PUBLIC
+                        || courses.isPublishedCourseAsset(f.getId())
+                        || tutors.isApprovedTutorAvatar(f.getId()))
                 .orElseThrow(() -> Errors.notFound("MEDIA_NOT_FOUND", "Media does not exist"));
         return content(m);
     }
 
     /**
      * Access policy for streaming media bytes: public assets, the owner, staff, published-course
-     * marketing assets (thumbnail/trailer), and enrolled students viewing a lesson video.
+     * marketing assets (thumbnail/trailer), an approved expert's portrait or the viewer's own,
+     * and enrolled students viewing a lesson video.
      */
     private boolean canAccess(MediaFile m, AuthenticatedPrincipal caller) {
         if (m.getVisibility() == MediaVisibility.PUBLIC) return true;
@@ -128,7 +137,11 @@ public class MediaService {
         if (caller.userId().equals(m.getOwnerUserId())) return true;
         if (caller.roles().contains("ADMIN") || caller.roles().contains("SUPER_ADMIN")) return true;
         if (courses.isPublishedCourseAsset(m.getId())) return true;
-        return lessons.isLessonMediaViewableBy(m.getId(), caller.userId());
+        if (lessons.isLessonMediaViewableBy(m.getId(), caller.userId())) return true;
+        // Asked last, so that streaming a lesson video — many range requests each — never pays for
+        // it. The dashboard previews a portrait through this endpoint, so an expert must see their
+        // own even when an admin uploaded it and the profile is not approved yet.
+        return tutors.isTutorAvatarVisibleTo(m.getId(), caller.userId());
     }
 
     /**
