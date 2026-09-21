@@ -10,6 +10,7 @@ import com.eduplatform.eduplatform_backend.course.web.dto.AdminCreateCourseReque
 import com.eduplatform.eduplatform_backend.course.web.dto.CourseDto;
 import com.eduplatform.eduplatform_backend.course.web.dto.CourseSummaryDto;
 import com.eduplatform.eduplatform_backend.course.web.dto.SetCourseTutorsRequest;
+import com.eduplatform.eduplatform_backend.course.web.dto.UpdateCourseRequest;
 import com.eduplatform.eduplatform_backend.course.web.mapper.CourseMapper;
 import com.eduplatform.eduplatform_backend.tutor.web.dto.ApprovalDecisionRequest;
 import io.swagger.v3.oas.annotations.Operation;
@@ -55,7 +56,7 @@ public class CourseAdminController {
     @PostMapping
     @PreAuthorize("hasAuthority('course:create_any')")
     @Operation(summary = "Create a course on behalf of the university and assign its tutors",
-            description = "Super-admin only. Unlike the tutor endpoint the tutors are stated explicitly, "
+            description = "Unlike the tutor endpoint the tutors are stated explicitly, "
                     + "since the course belongs to the university rather than to whoever creates it. "
                     + "authorizedTutorId nominates the single tutor permitted to edit the course and "
                     + "must be one of tutorIds.")
@@ -63,6 +64,34 @@ public class CourseAdminController {
                                                          @CurrentUser AuthenticatedPrincipal me) {
         return ResponseEntity.status(HttpStatus.CREATED)
                 .body(ApiResponse.ok(mapper.toDto(service.createByAdmin(me, req))));
+    }
+
+    @PatchMapping("/{id}")
+    @PreAuthorize("hasAuthority('course:manage')")
+    @Operation(summary = "Update any course (partial), whoever teaches it and whatever its status",
+            description = "Same body and same validation as the tutor's own edit, minus the "
+                    + "ownership restriction: courses belong to the university and an admin "
+                    + "maintains all of them.")
+    public ApiResponse<CourseDto> update(@PathVariable UUID id,
+                                         @Valid @RequestBody UpdateCourseRequest req,
+                                         @CurrentUser AuthenticatedPrincipal me) {
+        return ApiResponse.ok(mapper.toDto(service.updateByAdmin(me, id, req)));
+    }
+
+    @PostMapping("/{id}/publish")
+    @PreAuthorize("hasAuthority('course:publish')")
+    @Operation(summary = "Publish a course immediately, from any status",
+            description = "The moderation round trip is for reviewing a tutor's work; an admin "
+                    + "publishing has already reviewed it. An earlier publication date is kept.")
+    public ApiResponse<CourseDto> publish(@PathVariable UUID id, @CurrentUser AuthenticatedPrincipal me) {
+        return ApiResponse.ok(mapper.toDto(service.publish(id, me.userId())));
+    }
+
+    @PostMapping("/{id}/unpublish")
+    @PreAuthorize("hasAuthority('course:publish')")
+    @Operation(summary = "Take a course out of the catalogue and back to DRAFT")
+    public ApiResponse<CourseDto> unpublish(@PathVariable UUID id) {
+        return ApiResponse.ok(mapper.toDto(service.unpublish(id)));
     }
 
     @PutMapping("/{id}/tutors")

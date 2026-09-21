@@ -36,6 +36,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -377,7 +378,101 @@ public class CourseService {
     public Course updateByTutor(AuthenticatedPrincipal caller, UUID courseId, UpdateCourseRequest req) {
         Course course = get(courseId);
         requireOwner(course, caller.userId());
+        applyUpdate(caller, course, req);
+        return courses.save(course);
+    }
 
+    /**
+     * The same edit as {@link #updateByTutor}, without the tutor-ownership restriction and in
+     * any status: a course belongs to the university, so an admin maintains any of them —
+     * including the ones they created themselves, which name some other tutor as the
+     * authorised editor and so were not theirs to edit through the portal.
+     *
+     * <p>Every other rule is shared rather than restated, down to the media ownership and kind
+     * checks, because both paths run {@link #applyUpdate}. Unlike the tutor's own edit it is
+     * audited: changing someone else's course has to be attributable.
+     */
+    @Transactional
+    public Course updateByAdmin(AuthenticatedPrincipal caller, UUID courseId, UpdateCourseRequest req) {
+        Course course = get(courseId);
+        Map<String, Object> before = auditableFields(course);
+        applyUpdate(caller, course, req);
+        Course saved = courses.save(course);
+        audit.record(AuditService.Actions.UPDATE, "COURSE", saved.getId(), before, auditableFields(saved));
+        return saved;
+    }
+
+    /**
+     * Publish a course outright, from whatever status it is in.
+     *
+     * <p>The submit-then-decide round trip exists so that a tutor's work is reviewed before it
+     * goes live. An admin publishing has already done that review, and asking them to submit a
+     * course to themselves would add a step and nothing else, so no status is refused here.
+     *
+     * <p>The approval stamp is written too: {@link #isPublicBySlug} treats a published-at date
+     * as proof that the content passed moderation, and that invariant only holds while every
+     * route to PUBLISHED records who took responsibility for it.
+     */
+    @Transactional
+    public Course publish(UUID courseId, UUID adminId) {
+        Course course = get(courseId);
+        CourseStatus previous = course.getStatus();
+        Instant now = Instant.now();
+        course.setStatus(CourseStatus.PUBLISHED);
+        course.setApprovedAt(now);
+        course.setApprovedBy(adminId);
+        // First publication only. The catalogue orders by published_at, so re-publishing a
+        // course that was taken down for an edit must not float a two-year-old training to
+        // the top of the listing as though it were new.
+        if (course.getPublishedAt() == null) {
+            course.setPublishedAt(now);
+        }
+        course.setRejectionReason(null);
+        Course saved = courses.save(course);
+        audit.record(AuditService.Actions.PUBLISH, "COURSE", saved.getId(),
+                AuditService.snapshot("status", previous.name()),
+                AuditService.snapshot("status", saved.getStatus().name()));
+        return saved;
+    }
+
+    /**
+     * Take a course back out of the catalogue and return it to DRAFT, so it can be corrected
+     * and published again.
+     *
+     * <p>publishedAt is deliberately left standing: it is the date the course first went live,
+     * not a flag for "is live now" — status is that — and clearing it would both re-date the
+     * course on its next publication and, if it were later archived, hide it from the students
+     * already enrolled in it (see {@link #isPublicBySlug}).
+     */
+    @Transactional
+    public Course unpublish(UUID courseId) {
+        Course course = get(courseId);
+        CourseStatus previous = course.getStatus();
+        course.setStatus(CourseStatus.DRAFT);
+        Course saved = courses.save(course);
+        audit.record(AuditService.Actions.UPDATE, "COURSE", saved.getId(),
+                AuditService.snapshot("status", previous.name()),
+                AuditService.snapshot("status", saved.getStatus().name()));
+        return saved;
+    }
+
+    /**
+     * What is worth reconstructing from the audit trail after an admin edits a course they do
+     * not teach: what it is called and what it costs. AuditService drops the entries that did
+     * not move, so an unrelated edit records no misleading "change".
+     */
+    private static Map<String, Object> auditableFields(Course c) {
+        return AuditService.snapshot(
+                "title", c.getTitle(),
+                "free", c.isFree(),
+                // Plain string, so that a scale-only difference (10 vs 10.00) does not read as
+                // a price change in the diff.
+                "price", c.getPrice() == null ? null : c.getPrice().toPlainString(),
+                "currency", c.getCurrency());
+    }
+
+    /** Applies a partial update to an already-loaded course; who may do so is the caller's call. */
+    private void applyUpdate(AuthenticatedPrincipal caller, Course course, UpdateCourseRequest req) {
         // Same partial-update rule as every other field here: null leaves the current
         // media in place. An id equal to the current one is also left alone rather than
         // re-validated, because the dashboard resends the course's existing ids with every
@@ -409,7 +504,6 @@ public class CourseService {
         if (req.offlineDetails() != null && course.getCourseType() == CourseType.OFFLINE) {
             mergeOffline(course, req.offlineDetails());
         }
-        return courses.save(course);
     }
 
     @Transactional

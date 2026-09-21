@@ -71,6 +71,10 @@ public final class ApiClient {
         return new Call(HttpMethod.PATCH, path);
     }
 
+    public Call delete(String path) {
+        return new Call(HttpMethod.DELETE, path);
+    }
+
     /** One request being assembled. Nothing is sent until {@link #send()}. */
     public final class Call {
 

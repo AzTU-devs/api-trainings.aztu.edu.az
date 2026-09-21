@@ -33,7 +33,17 @@ public interface EnrollmentRepository extends JpaRepository<Enrollment, UUID> {
     @EntityGraph(attributePaths = {"course", "course.onlineDetails", "course.offlineDetails"})
     Page<Enrollment> findAllByUserId(UUID userId, Pageable pageable);
 
+    /**
+     * A course's roster for the admin participants screen. The user comes back in the same
+     * select because every row renders a name and an email, which would otherwise be one
+     * query per participant; the avatar is left lazy and read by id alone.
+     */
+    @EntityGraph(attributePaths = "user")
     Page<Enrollment> findAllByCourseId(UUID courseId, Pageable pageable);
+
+    /** As {@link #findAllByCourseId}, narrowed to one enrolment status. */
+    @EntityGraph(attributePaths = "user")
+    Page<Enrollment> findAllByCourseIdAndStatus(UUID courseId, EnrollmentStatus status, Pageable pageable);
 
     long countByCourseId(UUID courseId);
 
