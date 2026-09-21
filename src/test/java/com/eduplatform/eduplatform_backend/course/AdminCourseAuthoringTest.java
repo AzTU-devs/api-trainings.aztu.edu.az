@@ -275,13 +275,9 @@ class AdminCourseAuthoringTest extends AbstractIntegrationTest {
         return api.post("/api/admin/courses/" + courseId + "/unpublish").bearer(token).send();
     }
 
-    private JsonNode tutorIdsOf(JsonNode course) {
-        return course.path("tutors").isArray() ? course.path("tutors").findValues("tutorId").isEmpty()
-                ? course.path("tutors") : arrayOfTutorIds(course) : course.path("tutors");
-    }
-
-    private JsonNode arrayOfTutorIds(JsonNode course) {
-        return course.path("tutors");
+    /** The tutor ids on the course's teaching roster, in the order the API returned them. */
+    private static List<String> rosterOf(JsonNode course) {
+        return course.path("tutors").findValuesAsText("tutorId");
     }
 
     private String titleInDb(UUID courseId) {
