@@ -40,7 +40,7 @@ public class TutorAdminController {
     @PreAuthorize("hasAuthority('tutor:manage')")
     @Operation(summary = "Edit any expert's profile (partial), whatever its approval status",
             description = "Same body, rules and audit as the expert's own PATCH /api/portal/tutor/me. "
-                    + "avatarMediaId must be a READY image uploaded by the expert or by you. "
+                    + "avatarMediaId must be a READY image you uploaded yourself. "
                     + "Approval status cannot be changed here; use the decision endpoint.")
     public ApiResponse<TutorProfileDto> update(@PathVariable UUID tutorId,
                                                @Valid @RequestBody UpdateTutorProfileRequest req,

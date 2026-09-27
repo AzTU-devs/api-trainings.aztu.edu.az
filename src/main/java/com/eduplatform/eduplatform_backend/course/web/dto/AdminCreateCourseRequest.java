@@ -21,6 +21,6 @@ import java.util.UUID;
  */
 public record AdminCreateCourseRequest(
         @NotNull @Valid CreateCourseRequest course,
-        @NotEmpty(message = "At least one tutor must be assigned") Set<UUID> tutorIds,
+        @NotEmpty(message = "At least one tutor must be assigned") Set<@NotNull UUID> tutorIds,
         @NotNull(message = "An authorised tutor must be nominated") UUID authorizedTutorId
 ) {}

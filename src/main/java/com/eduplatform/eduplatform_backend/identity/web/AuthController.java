@@ -24,6 +24,8 @@ import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpHeaders;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -39,15 +41,18 @@ public class AuthController {
     private final TutorSignupService tutorSignup;
     private final com.eduplatform.eduplatform_backend.identity.service.AccountRecoveryService recovery;
     private final RefreshTokenCookie refreshCookie;
+    private final String portalOrigin;
 
     public AuthController(AuthService auth, AdminSignupService adminSignup, TutorSignupService tutorSignup,
                           com.eduplatform.eduplatform_backend.identity.service.AccountRecoveryService recovery,
-                          RefreshTokenCookie refreshCookie) {
+                          RefreshTokenCookie refreshCookie,
+                          @Value("${app.frontend.portal-url:http://localhost:3001}") String portalUrl) {
         this.auth = auth;
         this.adminSignup = adminSignup;
         this.tutorSignup = tutorSignup;
         this.recovery = recovery;
         this.refreshCookie = refreshCookie;
+        this.portalOrigin = originOf(portalUrl);
     }
 
     @PostMapping("/password/forgot")
@@ -63,6 +68,22 @@ public class AuthController {
     public ResponseEntity<Void> resetPassword(
             @Valid @RequestBody com.eduplatform.eduplatform_backend.identity.web.dto.ResetPasswordRequest req) {
         recovery.confirmPasswordReset(req.token(), req.password());
+        return ResponseEntity.noContent().build();
+    }
+
+    @PostMapping("/password/change")
+    @Operation(summary = "Change my password",
+            description = "Requires the current password (400 INVALID_CURRENT_PASSWORD otherwise; wrong ones "
+                    + "count towards the sign-in lockout). The new one follows the sign-up rule. Every other "
+                    + "session is signed out; the one presenting its refresh token (body, or the dashboard's "
+                    + "cookie) stays signed in.",
+            security = @SecurityRequirement(name = "bearerAuth"))
+    public ResponseEntity<Void> changePassword(
+            @Valid @RequestBody com.eduplatform.eduplatform_backend.identity.web.dto.ChangePasswordRequest req,
+            @CurrentUser AuthenticatedPrincipal me, HttpServletRequest http) {
+        String keep = req.refreshToken() == null || req.refreshToken().isBlank()
+                ? refreshCookie.read(http) : req.refreshToken();
+        auth.changePassword(me.userId(), req.currentPassword(), req.newPassword(), keep, http);
         return ResponseEntity.noContent().build();
     }
 
@@ -145,9 +166,9 @@ public class AuthController {
                                        HttpServletRequest http, HttpServletResponse response) {
         // Cleared unconditionally: signing out must leave nothing in the jar even when the token is
         // already expired, already revoked or simply absent, so logout stays idempotent (204).
-        refreshCookie.clear(response);
         String token = bodyToken(req);
-        if (token == null) token = refreshCookie.read(http);
+        if (token == null) token = cookieToken(http);
+        refreshCookie.clear(response);
         if (token != null) auth.logout(token);
         return ResponseEntity.noContent().build();
     }
@@ -215,12 +236,72 @@ public class AuthController {
      */
     private String resolveRefreshToken(RefreshRequest req, HttpServletRequest http) {
         String token = bodyToken(req);
-        if (token == null) token = refreshCookie.read(http);
+        if (token == null) token = cookieToken(http);
         if (token == null) {
             throw Errors.unauthorized("REFRESH_TOKEN_MISSING",
                     "No refresh token in the request body or session cookie");
         }
         return token;
+    }
+
+    /**
+     * The portal's refresh cookie, honoured only on a request that comes from the portal itself.
+     *
+     * <p>The cookie is the dashboard's, but a browser attaches it to any request to this path that
+     * CORS lets through — and CORS allows credentials for the public site too, which is same-site
+     * with the dashboard. So without this check a script running on the public site could
+     * refresh a signed-in administrator's session and read the fresh tokens out of the response.
+     *
+     * <p>A browser always sends Origin on these POSTs, and it must name the host the request was
+     * sent to — the dashboard reaches the API through its own nginx at the same address — or the
+     * configured portal URL, for a deployment where the dashboard calls the API on another host.
+     * Hosts are compared without ports, since a cookie is not port-specific either (the local
+     * stack serves the dashboard and the API from localhost on different ports). Where only
+     * Sec-Fetch-Site is sent it must say same-origin. A request with neither did not come from a
+     * browser page, and whoever sent it already holds the cookie's value. The public site's BFF
+     * sends its token in the body and never reaches this.
+     */
+    private String cookieToken(HttpServletRequest http) {
+        String token = refreshCookie.read(http);
+        if (token == null) return null;
+        String origin = http.getHeader(HttpHeaders.ORIGIN);
+        String fetchSite = http.getHeader("Sec-Fetch-Site");
+        boolean allowed = origin != null
+                ? originOf(origin).equals(portalOrigin) || hostOf(origin).equals(requestHost(http))
+                : fetchSite == null || "same-origin".equalsIgnoreCase(fetchSite);
+        if (!allowed) {
+            throw Errors.forbidden("REFRESH_ORIGIN_FORBIDDEN",
+                    "The session cookie can only be used from the dashboard");
+        }
+        return token;
+    }
+
+    /** scheme://host[:port], lower-cased, without a path or trailing slash. */
+    private static String originOf(String url) {
+        String trimmed = url == null ? "" : url.trim().toLowerCase(java.util.Locale.ROOT);
+        int schemeEnd = trimmed.indexOf("://");
+        int pathStart = schemeEnd < 0 ? -1 : trimmed.indexOf('/', schemeEnd + 3);
+        return pathStart < 0 ? trimmed : trimmed.substring(0, pathStart);
+    }
+
+    /** The host of an origin, without scheme or port; "" when there is none ("null", say). */
+    private static String hostOf(String origin) {
+        String o = originOf(origin);
+        int schemeEnd = o.indexOf("://");
+        if (schemeEnd < 0) return "";
+        String hostPort = o.substring(schemeEnd + 3);
+        if (hostPort.startsWith("[")) {   // an IPv6 literal
+            int close = hostPort.indexOf(']');
+            return close < 0 ? hostPort : hostPort.substring(0, close + 1);
+        }
+        int colon = hostPort.indexOf(':');
+        return colon < 0 ? hostPort : hostPort.substring(0, colon);
+    }
+
+    /** The host the request was addressed to, as the Host header (kept by the proxies) names it. */
+    private static String requestHost(HttpServletRequest http) {
+        String host = http.getHeader(HttpHeaders.HOST);
+        return host == null ? "" : hostOf("http://" + host);
     }
 
     private static String bodyToken(RefreshRequest req) {

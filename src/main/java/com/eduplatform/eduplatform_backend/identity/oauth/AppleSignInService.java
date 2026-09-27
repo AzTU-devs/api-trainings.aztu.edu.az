@@ -1,5 +1,6 @@
 package com.eduplatform.eduplatform_backend.identity.oauth;
 
+import com.eduplatform.eduplatform_backend.audit.service.HttpMeta;
 import com.eduplatform.eduplatform_backend.common.enums.AuthProvider;
 import com.eduplatform.eduplatform_backend.common.enums.OAuthIntent;
 import com.eduplatform.eduplatform_backend.common.error.Errors;
@@ -82,7 +83,7 @@ public class AppleSignInService {
                 .nonce(nonce)
                 .redirectUri(cfg.redirectUri())
                 .intent(OAuthIntent.LOGIN)
-                .ipAddress(req.getRemoteAddr())
+                .ipAddress(HttpMeta.clientIp(req))
                 .userAgent(truncate(req.getHeader("User-Agent"), 255))
                 .createdAt(Instant.now())
                 .expiresAt(Instant.now().plus(Duration.ofMinutes(10)))

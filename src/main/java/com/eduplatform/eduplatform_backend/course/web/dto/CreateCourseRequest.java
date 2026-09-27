@@ -2,6 +2,7 @@ package com.eduplatform.eduplatform_backend.course.web.dto;
 
 import com.eduplatform.eduplatform_backend.common.enums.CourseLevel;
 import com.eduplatform.eduplatform_backend.common.enums.CourseType;
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
 
 import java.math.BigDecimal;
@@ -25,8 +26,9 @@ public record CreateCourseRequest(
         @NotNull Boolean free,
         @NotNull @DecimalMin("0.00") @Digits(integer = 10, fraction = 2) BigDecimal price,
         @NotNull @Size(min = 3, max = 3) String currency,
-        @NotNull Set<UUID> categoryIds,
-        Set<UUID> tagIds,
+        // Element constraints: a null in either list used to reach findById and come back 500.
+        @NotNull Set<@NotNull UUID> categoryIds,
+        Set<@NotNull UUID> tagIds,
         OnlineDetailsDto onlineDetails,
-        OfflineDetailsDto offlineDetails
+        @Valid OfflineDetailsDto offlineDetails
 ) {}

@@ -18,5 +18,5 @@ public record RoomUpsertRequest(
         @NotNull @Size(min = 3, max = 3) String currency,
         @NotNull(message = "At least 2 images are required")
         @Size(min = 2, message = "At least 2 images are required")
-        List<UUID> imageMediaIds
+        List<@NotNull UUID> imageMediaIds
 ) {}

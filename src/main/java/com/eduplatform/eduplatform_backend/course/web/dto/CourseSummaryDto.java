@@ -30,6 +30,10 @@ public record CourseSummaryDto(
         /** Full teaching roster; tutorId above is the one authorised to edit. */
         List<CourseTutorDto> tutors,
         Instant publishedAt,
+        /** When the course was last submitted for review; null if it never was. */
+        Instant submittedAt,
+        /** The moderator's note when the course was sent back; null otherwise. */
+        String rejectionReason,
         /**
          * Course length in seconds, normalised across both course types: online video
          * seconds, or offline contact hours converted to seconds. Null when the course

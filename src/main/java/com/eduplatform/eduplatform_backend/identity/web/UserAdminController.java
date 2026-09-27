@@ -13,6 +13,7 @@ import com.eduplatform.eduplatform_backend.identity.web.dto.AdminUserUpdateReque
 import com.eduplatform.eduplatform_backend.identity.web.dto.UserStatusUpdateRequest;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
@@ -43,8 +44,9 @@ public class UserAdminController {
             @RequestParam(required = false) RoleCode role,
             @RequestParam(required = false) String status,
             @PageableDefault(size = 20, sort = "createdAt", direction = Sort.Direction.DESC) Pageable pageable) {
-        UserStatus statusFilter = parseStatusFilter(status);
-        return ApiResponse.ok(PageResponse.of(service.list(search, role, statusFilter, pageable)));
+        boolean lockedOnly = status != null && "LOCKED".equalsIgnoreCase(status.trim());
+        UserStatus statusFilter = lockedOnly ? null : parseStatusFilter(status);
+        return ApiResponse.ok(PageResponse.of(service.list(search, role, statusFilter, lockedOnly, pageable)));
     }
 
     @PostMapping
@@ -55,10 +57,13 @@ public class UserAdminController {
     }
 
     @PutMapping("/{id}")
-    @Operation(summary = "Update a user account")
+    @Operation(summary = "Update a user account",
+            description = "On your own account a new password is refused (403 SELF_PASSWORD_CHANGE_FORBIDDEN; "
+                    + "use POST /api/auth/password/change), and a new email needs currentPassword "
+                    + "(403 CURRENT_PASSWORD_REQUIRED, 400 INVALID_CURRENT_PASSWORD).")
     public ApiResponse<AdminUserDto> update(@PathVariable UUID id, @Valid @RequestBody AdminUserUpdateRequest req,
-                                            @CurrentUser AuthenticatedPrincipal me) {
-        return ApiResponse.ok(service.update(id, req, me.userId()));
+                                            @CurrentUser AuthenticatedPrincipal me, HttpServletRequest http) {
+        return ApiResponse.ok(service.update(id, req, me.userId(), http));
     }
 
     @PatchMapping("/{id}/status")
@@ -75,7 +80,10 @@ public class UserAdminController {
         return ResponseEntity.noContent().build();
     }
 
-    /** Maps the dashboard status filter to a backend status; unknown / blank → no filter. */
+    /**
+     * Maps the dashboard status filter to a backend status; unknown / blank → no filter. LOCKED is
+     * handled by the caller: a lockout is a timestamp on an ACTIVE account, not a status.
+     */
     private static UserStatus parseStatusFilter(String status) {
         if (status == null || status.isBlank()) return null;
         return switch (status.trim().toUpperCase()) {

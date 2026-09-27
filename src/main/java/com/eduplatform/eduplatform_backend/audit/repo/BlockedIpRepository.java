@@ -17,4 +17,6 @@ public interface BlockedIpRepository extends JpaRepository<BlockedIp, UUID> {
 
     @org.springframework.data.jpa.repository.Query("select b.ipAddress from BlockedIp b")
     List<String> findAllIpStrings();
+
+    List<BlockedIp> findAllByOrderByCreatedAtDesc();
 }

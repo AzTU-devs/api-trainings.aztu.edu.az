@@ -3,7 +3,6 @@ package com.eduplatform.eduplatform_backend.review.repo;
 import com.eduplatform.eduplatform_backend.review.domain.CourseReview;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
-import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -18,18 +17,52 @@ public interface CourseReviewRepository extends JpaRepository<CourseReview, UUID
 
     Optional<CourseReview> findByCourseIdAndUserId(UUID courseId, UUID userId);
 
+    // Reviews by an account that has been deleted are left out of every list and of the rating:
+    // deleting an account retires its reviews (ReviewService.retireReviewsOf), and these
+    // conditions keep a row that escaped that — one deleted before it existed, say — from
+    // counting where it can no longer be seen. The author's name comes from
+    // CourseReview.authorName, so no list loads the accounts.
+
     /**
-     * Brings each review's author back in the same select, because ReviewMapper builds
-     * {@code authorName} from the user after the transaction has closed (open-in-view=false).
-     * A to-one join, so the page is still limited in SQL.
+     * A course's visible reviews.
      *
-     * <p>No order of its own: the pageable's sort is the whole ORDER BY. An order in the method
-     * name would always come first, so a client's {@code sort} could never take effect.
-     * Callers reachable anonymously must hand in only a whitelisted sort — see
+     * <p>No order of its own: the pageable's sort is the whole ORDER BY. An order in the query
+     * would always come first, so a client's {@code sort} could never take effect. Callers
+     * reachable anonymously must hand in only a whitelisted sort — see
      * {@code ReviewService#forCourse}.
      */
-    @EntityGraph(attributePaths = "user")
-    Page<CourseReview> findAllByCourseIdAndVisibleTrue(UUID courseId, Pageable pageable);
+    @Query(value = """
+           select r from CourseReview r
+           where r.course.id = :courseId and r.visible = true
+             and exists (select 1 from User u where u.id = r.user.id and u.deletedAt is null)
+           """,
+           countQuery = """
+           select count(r) from CourseReview r
+           where r.course.id = :courseId and r.visible = true
+             and exists (select 1 from User u where u.id = r.user.id and u.deletedAt is null)
+           """)
+    Page<CourseReview> findVisibleByCourseId(@Param("courseId") UUID courseId, Pageable pageable);
+
+    /** Reviews for the moderation screen, hidden ones included; either filter may be null. */
+    @Query(value = """
+           select r from CourseReview r
+           where (:courseId is null or r.course.id = :courseId)
+             and (:visible is null or r.visible = :visible)
+             and exists (select 1 from User u where u.id = r.user.id and u.deletedAt is null)
+           order by r.createdAt desc, r.id desc
+           """,
+           countQuery = """
+           select count(r) from CourseReview r
+           where (:courseId is null or r.course.id = :courseId)
+             and (:visible is null or r.visible = :visible)
+             and exists (select 1 from User u where u.id = r.user.id and u.deletedAt is null)
+           """)
+    Page<CourseReview> searchForModeration(@Param("courseId") UUID courseId,
+                                          @Param("visible") Boolean visible,
+                                          Pageable pageable);
+
+    /** Every live review an account wrote, for retiring them with the account. */
+    List<CourseReview> findAllByUserId(UUID userId);
 
     /**
      * Average rating and count of a course's visible reviews: always exactly one row, since the
@@ -41,6 +74,7 @@ public interface CourseReviewRepository extends JpaRepository<CourseReview, UUID
            select coalesce(avg(r.rating), 0), count(r)
            from CourseReview r
            where r.course.id = :courseId and r.visible = true
+             and exists (select 1 from User u where u.id = r.user.id and u.deletedAt is null)
            """)
     List<Object[]> aggregateRating(@Param("courseId") UUID courseId);
 }

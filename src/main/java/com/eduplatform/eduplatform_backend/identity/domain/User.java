@@ -23,7 +23,9 @@ import java.util.Set;
 @SQLRestriction("deleted_at IS NULL")
 public class User extends SoftDeletable {
 
-    @Column(name = "email", nullable = false, unique = true, length = 255)
+    // Unique among live accounts only (uq_users_email_active, V16), so a deleted account's
+    // address can register again.
+    @Column(name = "email", nullable = false, length = 255)
     private String email;
 
     @Column(name = "phone", length = 32)
@@ -57,6 +59,24 @@ public class User extends SoftDeletable {
     @Column(name = "failed_logins", nullable = false)
     @Builder.Default
     private short failedLogins = 0;
+
+    /**
+     * Set when too many wrong passwords arrive in a row; password sign-in is refused until then.
+     * A lock that passes by itself, not a status: anyone can type five wrong passwords for
+     * someone else's address, so a lock that needed an administrator to lift let any visitor
+     * shut any account out, every SUPER_ADMIN included.
+     */
+    @Column(name = "locked_until")
+    private Instant lockedUntil;
+
+    /**
+     * Carried in every access token as its {@code ver} claim. Bumped whenever an administrator
+     * changes this account's roles, status or password, which makes every access token issued
+     * before the change stale at once rather than when it expires. See UserSessionState.
+     */
+    @Column(name = "token_version", nullable = false)
+    @Builder.Default
+    private long tokenVersion = 0;
 
     @Column(name = "locale", nullable = false, length = 8)
     @Builder.Default

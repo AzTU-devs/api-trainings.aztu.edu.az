@@ -1,11 +1,13 @@
 package com.eduplatform.eduplatform_backend.room.service;
 
+import com.eduplatform.eduplatform_backend.audit.service.AuditService;
 import com.eduplatform.eduplatform_backend.common.enums.RoomStatus;
 import com.eduplatform.eduplatform_backend.common.error.Errors;
 import com.eduplatform.eduplatform_backend.media.domain.MediaFile;
 import com.eduplatform.eduplatform_backend.media.repo.MediaFileRepository;
 import com.eduplatform.eduplatform_backend.room.domain.Room;
 import com.eduplatform.eduplatform_backend.room.domain.RoomImage;
+import com.eduplatform.eduplatform_backend.room.repo.RoomBookingRepository;
 import com.eduplatform.eduplatform_backend.room.repo.RoomRepository;
 import com.eduplatform.eduplatform_backend.room.web.dto.RoomUpsertRequest;
 import org.springframework.data.domain.Page;
@@ -14,6 +16,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @Service
@@ -21,10 +24,15 @@ public class RoomService {
 
     private final RoomRepository repo;
     private final MediaFileRepository media;
+    private final RoomBookingRepository bookings;
+    private final AuditService audit;
 
-    public RoomService(RoomRepository repo, MediaFileRepository media) {
+    public RoomService(RoomRepository repo, MediaFileRepository media, RoomBookingRepository bookings,
+                       AuditService audit) {
         this.repo = repo;
         this.media = media;
+        this.bookings = bookings;
+        this.audit = audit;
     }
 
     @Transactional(readOnly = true)
@@ -68,12 +76,15 @@ public class RoomService {
                 .build();
         r.setId(UUID.randomUUID());
         applyImages(r, req.imageMediaIds());
-        return repo.save(r);
+        Room saved = repo.save(r);
+        audit.record(AuditService.Actions.CREATE, "ROOM", saved.getId(), null, auditableFields(saved));
+        return saved;
     }
 
     @Transactional
     public Room update(UUID id, RoomUpsertRequest req) {
         Room r = get(id);
+        Map<String, Object> before = auditableFields(r);
         requireUniqueLocation(req.building(), req.roomNumber(), id);
         r.setName(req.name());
         r.setRoomNumber(req.roomNumber());
@@ -84,7 +95,17 @@ public class RoomService {
         r.setHourlyRate(req.hourlyRate());
         r.setCurrency(req.currency());
         applyImages(r, req.imageMediaIds());
-        return repo.save(r);
+        Room saved = repo.save(r);
+        audit.record(AuditService.Actions.UPDATE, "ROOM", saved.getId(), before, auditableFields(saved));
+        return saved;
+    }
+
+    private static Map<String, Object> auditableFields(Room r) {
+        return AuditService.snapshot(
+                "name", r.getName(), "roomNumber", r.getRoomNumber(), "building", r.getBuilding(),
+                "capacity", r.getCapacity(), "status", r.getStatus().name(),
+                "hourlyRate", r.getHourlyRate(),   // compared by value; see AuditService.snapshot
+                "currency", r.getCurrency());
     }
 
     /**
@@ -109,9 +130,23 @@ public class RoomService {
         }
     }
 
+    /**
+     * Deletes a room nobody has ever booked. A room with bookings on record — in any status,
+     * cancelled and past ones included, since every Booking requests tab lists them — is refused
+     * with 409 ROOM_HAS_BOOKINGS: retiring it takes it out of the catalogue and keeps the
+     * history readable. The foreign key's ON DELETE RESTRICT never fires on a soft delete, so it
+     * could not stop this by itself.
+     */
     @Transactional
     public void delete(UUID id) {
-        repo.delete(get(id));
+        Room room = get(id);
+        if (bookings.existsByRoomId(id)) {
+            throw Errors.conflict("ROOM_HAS_BOOKINGS",
+                    "This room has bookings on record. Set its status to RETIRED instead of deleting it.");
+        }
+        repo.delete(room);
+        audit.record(AuditService.Actions.DELETE, "ROOM", id, null,
+                AuditService.snapshot("name", room.getName(), "roomNumber", room.getRoomNumber()));
     }
 
     /** Friendly pre-check mirroring the DB partial unique index {@code uq_rooms_building_number}. */

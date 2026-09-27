@@ -24,13 +24,15 @@ import java.util.UUID;
 
 /**
  * Tutor video library. Upload flow: {@code POST /init} → {@code PUT /{id}/content}
- * (raw bytes) → {@code POST /{id}/complete}. All endpoints require the tutor
- * {@code course:create} authority.
+ * (raw bytes) → {@code POST /{id}/complete}. Open to anyone who authors courses: a tutor
+ * ({@code course:create}) or an administrator creating courses for the university
+ * ({@code course:create_any}), who otherwise had no way to put a video over the 32 MB multipart
+ * limit on a lesson.
  */
 @RestController
 @RequestMapping("/api/videos")
 @Tag(name = "Videos")
-@PreAuthorize("hasAuthority('course:create')")
+@PreAuthorize("hasAnyAuthority('course:create', 'course:create_any')")
 public class VideoController {
 
     private final VideoService service;

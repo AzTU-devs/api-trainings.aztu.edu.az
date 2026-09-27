@@ -83,6 +83,18 @@ public interface RefreshTokenRepository extends JpaRepository<RefreshToken, UUID
                          @Param("reason") TokenRevokeReason reason,
                          @Param("ts") Instant ts);
 
+    /** Every live token of the user outside one family: "sign out my other sessions". */
+    @Modifying
+    @Query("""
+           update RefreshToken t
+             set t.revokedAt = :ts, t.revokeReason = :reason
+           where t.user.id = :userId and t.revokedAt is null and t.familyId <> :keepFamilyId
+           """)
+    int revokeAllForUserExceptFamily(@Param("userId") UUID userId,
+                                     @Param("keepFamilyId") UUID keepFamilyId,
+                                     @Param("reason") TokenRevokeReason reason,
+                                     @Param("ts") Instant ts);
+
     @Modifying
     @Query("delete from RefreshToken t where t.expiresAt < :before")
     int deleteExpired(@Param("before") Instant before);

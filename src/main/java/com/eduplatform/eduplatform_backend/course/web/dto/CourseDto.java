@@ -30,6 +30,13 @@ public record CourseDto(
         String currency,
         CourseStatus status,
         Instant publishedAt,
+        /** When the course was last submitted for review; null if it never was. */
+        Instant submittedAt,
+        /**
+         * The moderator's note when the course was sent back. Only the course's tutors and staff
+         * see it; the public endpoint clears it for everyone else.
+         */
+        String rejectionReason,
         BigDecimal ratingAvg,
         int ratingCount,
         int enrolledCount,
@@ -41,5 +48,35 @@ public record CourseDto(
         Set<UUID> tagIds,
         OnlineDetailsDto onlineDetails,
         OfflineDetailsDto offlineDetails,
-        List<ModuleDto> modules
-) {}
+        List<ModuleDto> modules,
+        /**
+         * The optimistic-lock version. Send it back as {@code version} on PATCH and a save based on
+         * an out-of-date copy is refused with 409 STALE_RESOURCE instead of overwriting whatever
+         * someone else saved in between.
+         */
+        long version
+) {
+
+    /**
+     * The course as a visitor who holds no place on it sees it: the full outline — every module
+     * and lesson with its title, type, length and order — but the content itself (the text, the
+     * meeting or video link, the file) only for preview lessons.
+     */
+    public CourseDto withLessonContentHidden() {
+        List<ModuleDto> outline = modules == null ? null : modules.stream()
+                .map(ModuleDto::withLessonContentHidden)
+                .toList();
+        return new CourseDto(id, slug, title, subtitle, description, requirements, learningOutcomes, syllabus,
+                thumbnailMediaId, trailerMediaId, courseType, level, language, free, price, currency, status,
+                publishedAt, submittedAt, rejectionReason, ratingAvg, ratingCount, enrolledCount, tutorId,
+                tutorDisplayName, tutors, categoryIds, tagIds, onlineDetails, offlineDetails, outline, version);
+    }
+
+    /** Without the moderator's note, which is for the course's tutors and staff only. */
+    public CourseDto withoutModerationNote() {
+        return new CourseDto(id, slug, title, subtitle, description, requirements, learningOutcomes, syllabus,
+                thumbnailMediaId, trailerMediaId, courseType, level, language, free, price, currency, status,
+                publishedAt, submittedAt, null, ratingAvg, ratingCount, enrolledCount, tutorId,
+                tutorDisplayName, tutors, categoryIds, tagIds, onlineDetails, offlineDetails, modules, version);
+    }
+}

@@ -8,7 +8,6 @@ import com.eduplatform.eduplatform_backend.catalog.repo.TagRepository;
 import com.eduplatform.eduplatform_backend.common.enums.BookingDecision;
 import com.eduplatform.eduplatform_backend.common.enums.CourseStatus;
 import com.eduplatform.eduplatform_backend.common.enums.CourseType;
-import com.eduplatform.eduplatform_backend.common.enums.RoleCode;
 import com.eduplatform.eduplatform_backend.common.enums.TutorApprovalStatus;
 import com.eduplatform.eduplatform_backend.common.error.Errors;
 import com.eduplatform.eduplatform_backend.common.security.AuthenticatedPrincipal;
@@ -18,6 +17,7 @@ import com.eduplatform.eduplatform_backend.course.domain.OnlineCourseDetails;
 import com.eduplatform.eduplatform_backend.course.repo.CourseCatalogFilter;
 import com.eduplatform.eduplatform_backend.course.repo.CourseCatalogSort;
 import com.eduplatform.eduplatform_backend.course.repo.CourseRepository;
+import com.eduplatform.eduplatform_backend.course.repo.LessonRepository;
 import com.eduplatform.eduplatform_backend.course.service.CourseMediaValidator.MediaField;
 import com.eduplatform.eduplatform_backend.course.web.dto.AdminCreateCourseRequest;
 import com.eduplatform.eduplatform_backend.course.web.dto.CreateCourseRequest;
@@ -26,14 +26,18 @@ import com.eduplatform.eduplatform_backend.course.web.dto.OnlineDetailsDto;
 import com.eduplatform.eduplatform_backend.course.web.dto.SetCourseTutorsRequest;
 import com.eduplatform.eduplatform_backend.course.web.dto.UpdateCourseRequest;
 import com.eduplatform.eduplatform_backend.media.domain.MediaFile;
+import com.eduplatform.eduplatform_backend.notification.service.DecisionEvents;
 import com.eduplatform.eduplatform_backend.tutor.domain.TutorProfile;
 import com.eduplatform.eduplatform_backend.tutor.repo.TutorProfileRepository;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.Map;
@@ -49,11 +53,15 @@ public class CourseService {
     private final TagRepository tags;
     private final CourseMediaValidator mediaValidator;
     private final AuditService audit;
+    private final CourseAccess access;
+    private final LessonRepository lessons;
+    private final ApplicationEventPublisher events;
     private final boolean paymentsEnabled;
 
     public CourseService(CourseRepository courses, TutorProfileRepository tutors,
                          CategoryRepository categories, TagRepository tags, CourseMediaValidator mediaValidator,
-                         AuditService audit,
+                         AuditService audit, CourseAccess access, LessonRepository lessons,
+                         ApplicationEventPublisher events,
                          @Value("${app.payments.enabled:false}") boolean paymentsEnabled) {
         this.courses = courses;
         this.tutors = tutors;
@@ -61,6 +69,9 @@ public class CourseService {
         this.tags = tags;
         this.mediaValidator = mediaValidator;
         this.audit = audit;
+        this.access = access;
+        this.lessons = lessons;
+        this.events = events;
         this.paymentsEnabled = paymentsEnabled;
     }
 
@@ -78,22 +89,40 @@ public class CourseService {
      * <p>A PUBLISHED course, and an ARCHIVED one that was published before it was archived, is
      * visible to anyone, paid ones included. Every other course — DRAFT, IN_REVIEW, REJECTED,
      * or ARCHIVED without ever having been published — is visible only to one of the course's
-     * own tutors or to an admin: the dashboard opens drafts for editing and looks up IN_REVIEW
-     * courses for moderation through this same endpoint, with its bearer token attached.
+     * own tutors, to an admin, or to a participant who holds a place on it: the dashboard opens
+     * drafts for editing and looks up IN_REVIEW courses for moderation through this same
+     * endpoint, with its bearer token attached, and a participant keeps their course when an
+     * admin takes it back to DRAFT for an edit, or seats them on one that is not published yet.
      *
      * <p>Everyone else gets the same 404 as for a slug that does not exist, never a 403 —
      * a 403 would confirm that an unpublished course lives at that slug.
      *
+     * <p>How much of the course the viewer gets is decided here as well and returned with it: the
+     * full lesson content only with {@link CourseAccess#hasFullAccess}, and the moderator's note
+     * only for the course's tutors and staff.
+     *
      * @param viewer the caller if the request carried a valid access token, else null
      */
     @Transactional(readOnly = true)
-    public Course getBySlug(String slug, AuthenticatedPrincipal viewer) {
+    public SlugView getBySlug(String slug, AuthenticatedPrincipal viewer) {
         Course c = courses.findBySlug(slug)
-                .filter(found -> isPublicBySlug(found) || mayViewUnpublished(found, viewer))
                 .orElseThrow(() -> Errors.notFound("COURSE_NOT_FOUND", "Course does not exist"));
         initDetailGraph(c);
-        return c;
+        boolean manages = CourseAccess.mayManageContent(c, viewer);
+        boolean fullAccess = manages || access.hasFullAccess(c, viewer);
+        if (!isPublicBySlug(c) && !fullAccess) {
+            throw Errors.notFound("COURSE_NOT_FOUND", "Course does not exist");
+        }
+        return new SlugView(c, fullAccess, manages);
     }
+
+    /**
+     * A course together with what its viewer may see of it.
+     *
+     * @param fullLessonContent every lesson's text, link and file, not only the preview lessons'
+     * @param moderationNote    the note a moderator left when sending the course back
+     */
+    public record SlugView(Course course, boolean fullLessonContent, boolean moderationNote) {}
 
     /**
      * Whether anyone at all may open this course's detail page by slug.
@@ -105,8 +134,8 @@ public class CourseService {
      * a course in any status, so an ARCHIVED status alone does not mean an admin ever approved
      * the content; publishedAt does — only an approval sets it and nothing clears it. Without
      * this check, archiving a DRAFT or REJECTED course would publish it to the world unreviewed.
-     * Nobody can be enrolled in a never-published course either, so hiding it costs no student
-     * anything.
+     * The participants of such a course (an admin can seat people on one that was never
+     * published) still reach it through {@link CourseAccess#hasFullAccess}.
      *
      * <p>The catalogue listing filters on PUBLISHED on its own and is unaffected.
      */
@@ -116,18 +145,6 @@ public class CourseService {
             case ARCHIVED -> course.getPublishedAt() != null;
             case DRAFT, IN_REVIEW, REJECTED -> false;
         };
-    }
-
-    private static boolean mayViewUnpublished(Course course, AuthenticatedPrincipal viewer) {
-        if (viewer == null) return false;
-        if (isAdmin(viewer)) return true;
-        UUID me = viewer.userId();
-        // The authorised editor is checked as well as the roster: they are meant to be on
-        // it, but it is the editor who opens the draft, and a roster that drifted must not
-        // lock them out of their own course.
-        if (course.getTutor() != null && me.equals(course.getTutor().getUser().getId())) return true;
-        return course.getTutors().stream()
-                .anyMatch(t -> t.getUser() != null && me.equals(t.getUser().getId()));
     }
 
     /** Public catalogue: every filter in {@code filter} is applied in SQL, not over the page. */
@@ -190,17 +207,18 @@ public class CourseService {
 
     /** Touch the lazy associations the summary mapper reads, before the session closes. */
     private static void initSummaryGraph(Course c) {
+        // The experts' names come from TutorProfile.displayName, not from their accounts: loading
+        // the account of an expert deleted before deletion retired the profile (V21) threw, and
+        // turned every page holding one of their courses into a 404.
         if (c.getTutor() != null) {
-            c.getTutor().getUser().getFirstName();   // init tutor + user for display name
+            c.getTutor().getDisplayName();   // init the tutor proxy for the mapper
         }
         // The teaching roster is mapped into BOTH the summary and detail DTOs, and the
         // mapper runs after the transaction closes — leaving it lazy throws
         // LazyInitializationException on every course response. @BatchSize(50) on the
         // association keeps this from N+1-ing across a page of courses.
         if (c.getTutors() != null) {
-            c.getTutors().forEach(t -> {
-                if (t.getUser() != null) t.getUser().getFirstName();
-            });
+            c.getTutors().forEach(TutorProfile::getDisplayName);
         }
         // totalDurationSec on the card reads whichever detail row matches the course
         // type; both are lazy inverse one-to-ones. The catalogue query fetch-joins them,
@@ -228,6 +246,7 @@ public class CourseService {
             throw Errors.conflict("SLUG_ALREADY_EXISTS", "Course slug '" + req.slug() + "' is taken");
         }
         validateTypeSpecific(req.courseType(), req.onlineDetails(), req.offlineDetails());
+        requireConsistentPrice(Boolean.TRUE.equals(req.free()), req.price());
         MediaFile thumbnail = mediaValidator.resolve(req.thumbnailMediaId(), MediaField.COURSE_THUMBNAIL, caller);
         MediaFile trailer = mediaValidator.resolve(req.trailerMediaId(), MediaField.COURSE_TRAILER, caller);
 
@@ -252,7 +271,7 @@ public class CourseService {
                 .price(req.price())
                 .currency(req.currency())
                 .status(CourseStatus.DRAFT)
-                .categories(resolveCategories(req.categoryIds()))
+                .categories(resolveCategories(req.categoryIds(), Set.of()))
                 .tags(resolveTags(req.tagIds()))
                 // A tutor creating their own course starts as the sole roster entry and
                 // is the tutor authorised to edit it. Admins can widen the roster later.
@@ -282,6 +301,7 @@ public class CourseService {
             throw Errors.conflict("SLUG_ALREADY_EXISTS", "Course slug '" + c.slug() + "' is taken");
         }
         validateTypeSpecific(c.courseType(), c.onlineDetails(), c.offlineDetails());
+        requireConsistentPrice(Boolean.TRUE.equals(c.free()), c.price());
 
         Set<TutorProfile> roster = resolveTutors(req.tutorIds());
         TutorProfile authorized = requireAuthorizedAmong(roster, req.authorizedTutorId());
@@ -307,7 +327,7 @@ public class CourseService {
                 .price(c.price())
                 .currency(c.currency())
                 .status(CourseStatus.DRAFT)
-                .categories(resolveCategories(c.categoryIds()))
+                .categories(resolveCategories(c.categoryIds(), Set.of()))
                 .tags(resolveTags(c.tagIds()))
                 .tutors(roster)
                 .build();
@@ -355,6 +375,9 @@ public class CourseService {
     private Set<TutorProfile> resolveTutors(Set<UUID> tutorIds) {
         Set<TutorProfile> resolved = new HashSet<>();
         for (UUID id : tutorIds) {
+            // The request DTOs refuse a null element; this keeps one that got past them from
+            // reaching findById, which rejects it with a server error.
+            if (id == null) throw Errors.badRequest("INVALID_TUTOR", "Unknown tutor: null");
             TutorProfile t = tutors.findById(id).orElseThrow(() ->
                     Errors.notFound("TUTOR_NOT_FOUND", "Tutor profile " + id + " does not exist"));
             if (t.getApprovalStatus() != TutorApprovalStatus.APPROVED) {
@@ -378,6 +401,7 @@ public class CourseService {
     public Course updateByTutor(AuthenticatedPrincipal caller, UUID courseId, UpdateCourseRequest req) {
         Course course = get(courseId);
         requireOwner(course, caller.userId());
+        requireCurrentVersion(course, req.version());
         applyUpdate(caller, course, req);
         return courses.save(course);
     }
@@ -395,6 +419,7 @@ public class CourseService {
     @Transactional
     public Course updateByAdmin(AuthenticatedPrincipal caller, UUID courseId, UpdateCourseRequest req) {
         Course course = get(courseId);
+        requireCurrentVersion(course, req.version());
         Map<String, Object> before = auditableFields(course);
         applyUpdate(caller, course, req);
         Course saved = courses.save(course);
@@ -416,6 +441,7 @@ public class CourseService {
     @Transactional
     public Course publish(UUID courseId, UUID adminId) {
         Course course = get(courseId);
+        requirePublishableContent(course);
         CourseStatus previous = course.getStatus();
         Instant now = Instant.now();
         course.setStatus(CourseStatus.PUBLISHED);
@@ -432,6 +458,9 @@ public class CourseService {
         audit.record(AuditService.Actions.PUBLISH, "COURSE", saved.getId(),
                 AuditService.snapshot("status", previous.name()),
                 AuditService.snapshot("status", saved.getStatus().name()));
+        if (previous != CourseStatus.PUBLISHED) {
+            notifyOwner(saved, true, null);
+        }
         return saved;
     }
 
@@ -459,15 +488,15 @@ public class CourseService {
     /**
      * What is worth reconstructing from the audit trail after an admin edits a course they do
      * not teach: what it is called and what it costs. AuditService drops the entries that did
-     * not move, so an unrelated edit records no misleading "change".
+     * not move, so an unrelated edit records no misleading "change". The price goes in as the
+     * number it is; AuditService.snapshot compares numbers by value, so the 50 a form sends
+     * back for a stored 50.00 is no change.
      */
     private static Map<String, Object> auditableFields(Course c) {
         return AuditService.snapshot(
                 "title", c.getTitle(),
                 "free", c.isFree(),
-                // Plain string, so that a scale-only difference (10 vs 10.00) does not read as
-                // a price change in the diff.
-                "price", c.getPrice() == null ? null : c.getPrice().toPlainString(),
+                "price", c.getPrice(),
                 "currency", c.getCurrency());
     }
 
@@ -478,10 +507,17 @@ public class CourseService {
         // re-validated, because the dashboard resends the course's existing ids with every
         // save — re-checking them would fail an unrelated title edit whenever the current
         // cover was uploaded by an admin rather than by this tutor.
-        if (req.thumbnailMediaId() != null && !req.thumbnailMediaId().equals(idOf(course.getThumbnail()))) {
+        //
+        // Removing needs its own flag, because a record reads an explicit null exactly as an
+        // absent field. Both columns are nullable and no publication rule needs a cover.
+        if (Boolean.TRUE.equals(req.clearThumbnail())) {
+            course.setThumbnail(null);
+        } else if (req.thumbnailMediaId() != null && !req.thumbnailMediaId().equals(idOf(course.getThumbnail()))) {
             course.setThumbnail(mediaValidator.resolve(req.thumbnailMediaId(), MediaField.COURSE_THUMBNAIL, caller));
         }
-        if (req.trailerMediaId() != null && !req.trailerMediaId().equals(idOf(course.getTrailer()))) {
+        if (Boolean.TRUE.equals(req.clearTrailer())) {
+            course.setTrailer(null);
+        } else if (req.trailerMediaId() != null && !req.trailerMediaId().equals(idOf(course.getTrailer()))) {
             course.setTrailer(mediaValidator.resolve(req.trailerMediaId(), MediaField.COURSE_TRAILER, caller));
         }
         if (req.title() != null)            course.setTitle(req.title());
@@ -494,8 +530,12 @@ public class CourseService {
         if (req.language() != null)         course.setLanguage(req.language());
         if (req.free() != null)             course.setFree(req.free());
         if (req.price() != null)            course.setPrice(req.price());
+        // Turning a course free without saying what it costs means it costs nothing; the old price
+        // left in place is what made the switch fail on the price CHECK.
+        if (Boolean.TRUE.equals(req.free()) && req.price() == null) course.setPrice(BigDecimal.ZERO);
+        requireConsistentPrice(course.isFree(), course.getPrice());
         if (req.currency() != null)         course.setCurrency(req.currency());
-        if (req.categoryIds() != null)      course.setCategories(resolveCategories(req.categoryIds()));
+        if (req.categoryIds() != null)      course.setCategories(resolveCategories(req.categoryIds(), course.getCategories()));
         if (req.tagIds() != null)           course.setTags(resolveTags(req.tagIds()));
 
         if (req.onlineDetails() != null && course.getCourseType() == CourseType.ONLINE) {
@@ -514,8 +554,10 @@ public class CourseService {
             throw Errors.conflict("INVALID_COURSE_TRANSITION",
                     "Course can only be submitted for review from DRAFT or REJECTED");
         }
+        requirePublishableContent(course);
         course.setStatus(CourseStatus.IN_REVIEW);
         course.setRejectionReason(null);
+        course.setSubmittedAt(Instant.now());
         return courses.save(course);
     }
 
@@ -527,10 +569,16 @@ public class CourseService {
                     "Course is not in review and cannot receive an approval decision");
         }
         if (decision == BookingDecision.APPROVED) {
+            requirePublishableContent(course);
+            Instant now = Instant.now();
             course.setStatus(CourseStatus.PUBLISHED);
-            course.setApprovedAt(Instant.now());
+            course.setApprovedAt(now);
             course.setApprovedBy(adminId);
-            course.setPublishedAt(Instant.now());
+            // First publication only, as in publish(): a course that went back to DRAFT for an
+            // edit and through review again keeps its place in the catalogue's order.
+            if (course.getPublishedAt() == null) {
+                course.setPublishedAt(now);
+            }
             course.setRejectionReason(null);
         } else {
             course.setStatus(CourseStatus.REJECTED);
@@ -541,35 +589,99 @@ public class CourseService {
                 decision == BookingDecision.APPROVED ? AuditService.Actions.PUBLISH : AuditService.Actions.REJECT,
                 "COURSE", saved.getId(), null,
                 AuditService.snapshot("status", saved.getStatus().name(), "note", note));
+        notifyOwner(saved, decision == BookingDecision.APPROVED, note);
         return saved;
     }
 
+    /** The tutor archiving their own course. */
     @Transactional
     public void archive(UUID userId, UUID courseId) {
         Course course = get(courseId);
         requireOwner(course, userId);
+        archive(course);
+    }
+
+    /**
+     * An admin archiving any course, whoever teaches it: the last step of a training's life, which
+     * until now only the course's own tutor could take. publishedAt is kept, which keeps an
+     * archived course that was once published reachable for its participants (see
+     * {@link #isPublicBySlug}).
+     */
+    @Transactional
+    public Course archiveByAdmin(UUID courseId) {
+        Course course = get(courseId);
+        return archive(course);
+    }
+
+    private Course archive(Course course) {
+        CourseStatus previous = course.getStatus();
         course.setStatus(CourseStatus.ARCHIVED);
-        courses.save(course);
+        Course saved = courses.save(course);
+        audit.record(AuditService.Actions.ARCHIVE, "COURSE", saved.getId(),
+                AuditService.snapshot("status", previous.name()),
+                AuditService.snapshot("status", saved.getStatus().name()));
+        return saved;
+    }
+
+    /**
+     * An ONLINE course is its lessons; publishing one with none put an empty page in the
+     * catalogue that participants could enrol in. OFFLINE courses are exempt: their substance is
+     * the sessions in the room, and many carry no online material at all.
+     */
+    private void requirePublishableContent(Course course) {
+        if (course.getCourseType() == CourseType.ONLINE && lessons.countByCourseId(course.getId()) == 0) {
+            throw Errors.unprocessable("COURSE_HAS_NO_CONTENT",
+                    "An online training needs at least one lesson before it can be submitted or published");
+        }
+    }
+
+    /** Tells the authorised tutor about a moderation outcome once it has committed. */
+    private void notifyOwner(Course course, boolean published, String note) {
+        if (course.getTutor() == null || course.getTutor().getUser() == null) return;
+        events.publishEvent(new DecisionEvents.CourseDecided(course.getTutor().getUser().getId(),
+                course.getId(), course.getTitle(), published, note));
+    }
+
+    /**
+     * Refuses an edit made from an out-of-date copy of the course. The entity's @Version only
+     * protects one transaction against another; an edit loads, applies and saves in one go, so
+     * two people with the same form open used to overwrite each other without either knowing.
+     * The version the client last read closes that gap. Answered with the 409 STALE_RESOURCE the
+     * exception handler gives every optimistic-lock failure.
+     */
+    private static void requireCurrentVersion(Course course, Long expected) {
+        if (expected != null && expected != course.getVersion()) {
+            throw new ObjectOptimisticLockingFailureException(Course.class, course.getId());
+        }
     }
 
     // ---------- helpers ----------
-
-    private static boolean isAdmin(AuthenticatedPrincipal caller) {
-        return caller.roles().contains(RoleCode.ADMIN.name())
-                || caller.roles().contains(RoleCode.SUPER_ADMIN.name());
-    }
 
     private static UUID idOf(MediaFile m) {
         // Reading the id off a lazy proxy does not load the row.
         return m == null ? null : m.getId();
     }
 
+    /**
+     * The authorised editor, and only while their expert approval stands. Rejecting an approved
+     * expert withdraws the TUTOR role, but an access token issued before that still carries the
+     * permission, and the approval is what the editing right really rests on.
+     */
     private void requireOwner(Course course, UUID userId) {
         if (!course.getTutor().getUser().getId().equals(userId)) {
             throw Errors.forbidden("NOT_COURSE_OWNER", "Only the course owner can perform this action");
         }
+        if (course.getTutor().getApprovalStatus() != TutorApprovalStatus.APPROVED) {
+            throw Errors.forbidden("TUTOR_NOT_APPROVED", "Your expert profile is not approved");
+        }
     }
 
+    /**
+     * Checks the type-specific details and the price of a course being created. Every rule the
+     * database enforces with a CHECK is checked here first, so a bad request is a 400 that says
+     * what is wrong: missing dates used to be a NullPointerException (500), and a free course
+     * with a price hit chk_course_price as a bare 409 "conflicts with existing data".
+     */
     private void validateTypeSpecific(CourseType type, OnlineDetailsDto online, OfflineDetailsDto offline) {
         if (type == CourseType.ONLINE && offline != null) {
             throw Errors.badRequest("INVALID_DETAILS", "ONLINE course cannot have offline details");
@@ -578,12 +690,30 @@ public class CourseService {
             if (offline == null) {
                 throw Errors.badRequest("OFFLINE_DETAILS_REQUIRED", "OFFLINE course requires offlineDetails");
             }
-            if (offline.endDate().isBefore(offline.startDate())) {
-                throw Errors.badRequest("INVALID_DATE_RANGE", "endDate must be on or after startDate");
+            if (offline.startDate() == null || offline.endDate() == null) {
+                throw Errors.badRequest("OFFLINE_DATES_REQUIRED",
+                        "An in-person training needs a start date and an end date");
             }
-            if (offline.studentLimit() <= 0) {
-                throw Errors.badRequest("INVALID_STUDENT_LIMIT", "studentLimit must be positive");
+            if (offline.studentLimit() == null) {
+                throw Errors.badRequest("INVALID_STUDENT_LIMIT", "studentLimit is required and must be positive");
             }
+            requireValidOffline(offline.startDate(), offline.endDate(), offline.studentLimit());
+        }
+    }
+
+    private static void requireValidOffline(java.time.LocalDate start, java.time.LocalDate end, int studentLimit) {
+        if (end.isBefore(start)) {
+            throw Errors.badRequest("INVALID_DATE_RANGE", "endDate must be on or after startDate");
+        }
+        if (studentLimit <= 0) {
+            throw Errors.badRequest("INVALID_STUDENT_LIMIT", "studentLimit must be positive");
+        }
+    }
+
+    /** A free course costs nothing; the database refuses any other price for it. */
+    private static void requireConsistentPrice(boolean free, BigDecimal price) {
+        if (free && price != null && price.signum() != 0) {
+            throw Errors.badRequest("INVALID_PRICE", "A free training cannot have a price; set it to 0");
         }
     }
 
@@ -591,9 +721,12 @@ public class CourseService {
         if (type == CourseType.ONLINE) {
             OnlineCourseDetails d = OnlineCourseDetails.builder()
                     .course(course)
-                    .totalVideoSeconds(online == null ? 0 : online.totalVideoSeconds())
-                    .hasCertificate(online != null && online.hasCertificate())
-                    .dripEnabled(online != null && online.dripEnabled())
+                    .totalVideoSeconds(online == null || online.totalVideoSeconds() == null
+                            ? 0 : online.totalVideoSeconds())
+                    // Stored as false whatever was asked: nothing issues certificates or drips
+                    // lessons yet, so a course must not advertise either. See OnlineDetailsDto.
+                    .hasCertificate(false)
+                    .dripEnabled(false)
                     .build();
             course.setOnlineDetails(d);
         } else {
@@ -611,32 +744,49 @@ public class CourseService {
         }
     }
 
+    /** Merges only what the request carries; see UpdateCourseRequest. */
     private void mergeOnline(Course course, OnlineDetailsDto d) {
         OnlineCourseDetails od = course.getOnlineDetails();
         if (od == null) return;
-        od.setTotalVideoSeconds(d.totalVideoSeconds());
-        od.setHasCertificate(d.hasCertificate());
-        od.setDripEnabled(d.dripEnabled());
+        if (d.totalVideoSeconds() != null) od.setTotalVideoSeconds(d.totalVideoSeconds());
     }
 
+    /**
+     * Merges only what the request carries. Every property used to be copied, so a PATCH naming
+     * just the city nulled both dates and zeroed the student limit, and then failed on the
+     * table's CHECKs with a bare 409.
+     */
     private void mergeOffline(Course course, OfflineDetailsDto d) {
         OfflineCourseDetails od = course.getOfflineDetails();
         if (od == null) return;
-        od.setStartDate(d.startDate());
-        od.setEndDate(d.endDate());
-        od.setWeeklyHours(d.weeklyHours());
-        od.setTotalHours(d.totalHours());
-        od.setStudentLimit(d.studentLimit());
-        od.setCity(d.city());
-        od.setAddressLine(d.addressLine());
+        if (d.startDate() != null)    od.setStartDate(d.startDate());
+        if (d.endDate() != null)      od.setEndDate(d.endDate());
+        if (d.weeklyHours() != null)  od.setWeeklyHours(d.weeklyHours());
+        if (d.totalHours() != null)   od.setTotalHours(d.totalHours());
+        if (d.studentLimit() != null) od.setStudentLimit(d.studentLimit());
+        if (d.city() != null)         od.setCity(d.city());
+        if (d.addressLine() != null)  od.setAddressLine(d.addressLine());
+        requireValidOffline(od.getStartDate(), od.getEndDate(), od.getStudentLimit());
     }
 
-    private Set<Category> resolveCategories(Set<UUID> ids) {
+    /**
+     * The categories named by {@code ids}. A category an admin has hidden cannot be newly
+     * assigned, but one the course already has is kept: hiding a category must not make every
+     * course filed under it impossible to save.
+     */
+    private Set<Category> resolveCategories(Set<UUID> ids, Set<Category> current) {
         if (ids == null) return new HashSet<>();
+        Set<UUID> kept = current.stream().map(Category::getId).collect(java.util.stream.Collectors.toSet());
         Set<Category> out = new HashSet<>();
         for (UUID id : ids) {
-            out.add(categories.findById(id).orElseThrow(
-                    () -> Errors.badRequest("INVALID_CATEGORY", "Unknown category: " + id)));
+            // See resolveTutors: a null element is the caller's mistake, not a server error.
+            if (id == null) throw Errors.badRequest("INVALID_CATEGORY", "Unknown category: null");
+            Category category = categories.findById(id).orElseThrow(
+                    () -> Errors.badRequest("INVALID_CATEGORY", "Unknown category: " + id));
+            if (!category.isActive() && !kept.contains(id)) {
+                throw Errors.badRequest("CATEGORY_INACTIVE", "Category " + category.getName() + " is hidden");
+            }
+            out.add(category);
         }
         return out;
     }
@@ -645,6 +795,7 @@ public class CourseService {
         if (ids == null) return new HashSet<>();
         Set<Tag> out = new HashSet<>();
         for (UUID id : ids) {
+            if (id == null) throw Errors.badRequest("INVALID_TAG", "Unknown tag: null");
             out.add(tags.findById(id).orElseThrow(
                     () -> Errors.badRequest("INVALID_TAG", "Unknown tag: " + id)));
         }

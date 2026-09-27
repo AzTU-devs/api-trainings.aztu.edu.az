@@ -3,6 +3,7 @@ package com.eduplatform.eduplatform_backend.tutor.web.mapper;
 import com.eduplatform.eduplatform_backend.catalog.domain.Category;
 import com.eduplatform.eduplatform_backend.tutor.domain.TutorProfile;
 import com.eduplatform.eduplatform_backend.tutor.web.dto.TutorProfileDto;
+import com.eduplatform.eduplatform_backend.tutor.web.dto.TutorPublicProfileDto;
 import org.mapstruct.Mapper;
 import org.mapstruct.Mapping;
 import org.mapstruct.Named;
@@ -21,6 +22,12 @@ public interface TutorMapper {
     @Mapping(target = "avatarUrl", expression = "java(avatarUrl(tutor))")
     @Mapping(target = "expertiseCategoryIds", source = "expertises", qualifiedByName = "categoryIds")
     TutorProfileDto toDto(TutorProfile tutor);
+
+    @Mapping(target = "firstName", source = "user.firstName")
+    @Mapping(target = "lastName",  source = "user.lastName")
+    @Mapping(target = "avatarUrl", expression = "java(avatarUrl(tutor))")
+    @Mapping(target = "expertiseCategoryIds", source = "expertises", qualifiedByName = "categoryIds")
+    TutorPublicProfileDto toPublicDto(TutorProfile tutor);
 
     @Named("categoryIds")
     default Set<UUID> categoryIds(Set<Category> categories) {

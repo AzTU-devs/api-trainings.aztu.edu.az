@@ -173,8 +173,15 @@ will fail with "connection refused". On Linux the cleanest fix is to share the
 host network, which keeps Postgres bound to loopback:
 
 ```bash
-docker run --network host --env-file .env eduplatform-backend:latest
+docker run --network host --env-file .env -e SPRING_PROFILES_ACTIVE=prod \
+  -v /opt/uploads:/opt/uploads eduplatform-backend:latest
 ```
+
+`-e SPRING_PROFILES_ACTIVE=prod` is there because anything in `--env-file` beats
+the image's own `prod` default, and a `.env` that says `dev` would start this
+database's first boot with the seed accounts. In production use
+`docker compose -f docker-compose.prod.yml up -d` from the API repo instead: it
+does the same, and pins the profile the same way.
 
 The alternative — publishing Postgres to the Docker bridge and using
 `host.docker.internal` — means listening beyond loopback and widening
@@ -188,13 +195,25 @@ Start the backend and watch the migration run:
 ```
 Migrating schema "public" to version "1 - init"
 ...
-Successfully applied 7 migrations to schema "public", now at version v9
+Successfully applied <N> migrations to schema "public", now at version v<highest>
 ```
 
-**7 migrations, not 9.** Nine means the `dev` profile leaked in and seeded
-`ADMIN`/`SUPER_ADMIN` accounts with the shared password `Password123!`. The
-`prod` profile refuses to start in that case, so if you see 9, check
-`SPRING_PROFILES_ACTIVE`.
+**One migration per file in `src/main/resources/db/migration`**
+(`ls src/main/resources/db/migration`), from V1 up to the highest version there,
+with 6 and 7 missing. Versions 6 and 7 live in `db/dev` and must never appear. If
+they do, the `dev` profile was active and seeded `ADMIN` and `SUPER_ADMIN`
+accounts with the shared password `Password123!`.
+
+`StartupSecurityValidator` refuses `dev` combined with any other profile (such as
+`prod,dev`) and refuses `db/dev` on the Flyway path outside `dev`, but it stands
+down when `dev` is the only profile: that is the local setup, and nothing at
+startup can tell it apart from a server set up wrongly. What prevents it on the
+server is the profile itself: `docker-compose.prod.yml` pins
+`SPRING_PROFILES_ACTIVE=prod`, so `.env` cannot change it. If you see version 6
+or 7, stop the backend, check `SPRING_PROFILES_ACTIVE` everywhere it can be set,
+and drop and recreate this database before going further. Starting it under
+`prod` afterwards fails anyway: Flyway refuses a history that lists migrations
+the build does not have.
 
 Verify from the database side:
 
@@ -204,7 +223,8 @@ psql "postgresql://eduplatform@127.0.0.1:5432/eduplatform" \
   -c "select count(*) from users where email like '%@eduplatform.local';"
 ```
 
-Expect versions 1,2,3,4,5,8,9 and a seed-account count of **0**.
+Expect every version in `db/migration` (1 to 5, then 8 up to the highest), never
+6 or 7, and a seed-account count of **0**.
 
 Then check the app:
 
@@ -217,72 +237,214 @@ curl -s localhost:8080/actuator/health/readiness    # {"status":"UP"}
 Admin self-registration is bootstrap-only — it is refused automatically once any
 `ADMIN`/`SUPER_ADMIN` exists, but leave nothing to chance:
 
-1. Set `ADMIN_SELF_REGISTER=true`, restart.
+1. Set `ADMIN_SELF_REGISTER=true` in `.env` and apply it with
+   `docker compose -f docker-compose.prod.yml up -d`. `restart` would keep the old
+   value, because `.env` is read only when the container is created.
 2. Register your admin account through the portal.
-3. Set `ADMIN_SELF_REGISTER=false`, restart.
+3. Set `ADMIN_SELF_REGISTER=false` and run the same `up -d`.
+
+The exact commands are in
+[deployment.md §8](docs/operations/deployment.md#8-create-the-first-admin).
 
 ## 9. Backups
 
-Nothing above protects you from a bad migration or a dropped table.
+Nothing above protects you from a bad migration, a dropped table or a lost disk.
+The backup is three scripts in [deploy/backup/](deploy/backup/):
+
+| Script | Runs on | Does |
+| --- | --- | --- |
+| `backup-eduplatform.sh` | this server, nightly | Dumps the database, snapshots `/opt/uploads`, prunes what is older than 14 days, records success |
+| `pull-eduplatform-backup.sh` | a second machine, nightly | Copies the newest backup off this server |
+| `restore-eduplatform.sh` | this server, when needed | Puts the database and the uploads back |
+
+The procedure this replaces made no backups at all. It ran its steps as
+`postgres`, which on stock Ubuntu can neither create `/var/backups/postgres` nor
+write to `/usr/local/bin`. Both steps failed with `Permission denied`, `chmod`
+then failed too, and cron called a missing script every night without a word.
+The backup now runs as root. `pg_dump` still runs as `postgres`, but the script
+opens the output file, so `postgres` needs no access to the backup directory.
+
+### Install
 
 ```bash
-sudo -u postgres mkdir -p /var/backups/postgres
-sudo -u postgres tee /usr/local/bin/backup-eduplatform.sh >/dev/null <<'EOF'
-#!/bin/sh
-set -eu
-DEST=/var/backups/postgres
-pg_dump -Fc eduplatform > "$DEST/eduplatform-$(date +%F-%H%M).dump"
-find "$DEST" -name 'eduplatform-*.dump' -mtime +14 -delete
+cd /opt/trainings/api-trainings.aztu.edu.az
+sudo apt install -y rsync
+
+# Backups are root:eduplatform-backup, files 0640 and directories 2750: this group
+# can read them (the off-host puller below is its only member) and nobody else can.
+sudo groupadd --system eduplatform-backup
+sudo install -d -o root -g eduplatform-backup -m 2750 /var/backups/eduplatform
+
+sudo install -o root -g root -m 0755 deploy/backup/backup-eduplatform.sh  /usr/local/sbin/backup-eduplatform
+sudo install -o root -g root -m 0755 deploy/backup/restore-eduplatform.sh /usr/local/sbin/restore-eduplatform
+```
+
+These are copies, not links into the checkout. Cron runs the backup as root, and
+a root job must not run a file that anyone with write access to the repo could
+change. Run the two `install` lines again after a `git pull` that touches
+`deploy/backup/`.
+
+Schedule it nightly at 03:00, with output going to the journal
+(`journalctl -t eduplatform-backup`):
+
+```bash
+sudo tee /etc/cron.d/eduplatform-backup >/dev/null <<'EOF'
+# Nightly database + uploads backup: api-trainings.aztu.edu.az/deploy/backup
+0 3 * * * root /usr/local/sbin/backup-eduplatform 2>&1 | logger -t eduplatform-backup
+30 9 * * * root /usr/local/sbin/backup-eduplatform --check >/dev/null || logger -p user.err -t eduplatform-backup "STALE: no successful backup in the last 26 hours"
 EOF
-sudo chmod +x /usr/local/bin/backup-eduplatform.sh
 ```
 
-Nightly at 03:00, as the `postgres` user:
+The file name has no dot on purpose: cron ignores files in `/etc/cron.d` whose
+names contain one.
+
+If you followed the old instructions, remove the crontab line they left behind:
+`sudo crontab -u postgres -l`, then `sudo crontab -u postgres -e` and delete the
+`backup-eduplatform.sh` line.
+
+Take the first backup now and check it:
 
 ```bash
-sudo crontab -u postgres -e
-# 0 3 * * * /usr/local/bin/backup-eduplatform.sh
+sudo backup-eduplatform
+sudo backup-eduplatform --check     # OK: last successful backup finished 0h ago (...)
+sudo ls -la /var/backups/eduplatform/db /var/backups/eduplatform/uploads
 ```
 
-Restore drill (do this once, on a scratch database — an untested backup is not a
-backup):
+### What it keeps
+
+- `db/eduplatform-<stamp>.dump`: `pg_dump` custom format. Each dump is checked
+  with `pg_restore --list` before it counts.
+- `uploads/<stamp>/`: a complete copy of `/opt/uploads`. Files that are unchanged
+  since the previous night are hard links to it (`rsync --link-dest`), so the
+  first snapshot costs the size of `/opt/uploads` and each later one costs only
+  that day's new uploads. The procedure this replaces made a full `.tar.gz` every
+  night and kept 14 of them, so with lesson videos of up to 512 MB each it could
+  have filled the disk.
+- 14 days of both, pruned by the date in the name, and only after a run that
+  succeeded. A backup that keeps failing never deletes the good ones.
+
+### Knowing that it works
+
+On a host without mail, cron throws the output away, so a failing backup makes no
+noise. The script writes `/var/backups/eduplatform/.last-success` at the very end
+of a run that worked, and nowhere else:
+
+- `backup-eduplatform --check` exits 1 once that is more than 26 hours old. The
+  second cron line above logs an error when it does; point anything that watches
+  the host's journal at it.
+- For an alert that reaches a person, set a dead man's switch (healthchecks.io,
+  or an Uptime Kuma push monitor) in `/etc/default/eduplatform-backup`:
+
+  ```bash
+  echo 'BACKUP_PING_URL=https://hc-ping.com/<your-check-uuid>' | sudo tee /etc/default/eduplatform-backup
+  sudo chmod 600 /etc/default/eduplatform-backup
+  ```
+
+  The script calls it after every successful run, and the monitor alerts when the
+  calls stop arriving. That covers a broken script, a full disk and a dead cron
+  too.
+
+### Copy it off this server
+
+A backup on the same disk as the database survives only the failures that were
+never going to hurt you. Pull the copies from a second machine rather than
+pushing them from here. A server that can push can also overwrite and delete, so
+an intruder here, or a mistaken `rm -rf` here, would reach the off-host copies
+as well.
+
+On **this server**, create a login that can only read `/var/backups/eduplatform`
+over rsync:
+
+```bash
+sudo useradd --system --create-home --shell /bin/sh --groups eduplatform-backup backup-pull
+sudo install -d -o backup-pull -g backup-pull -m 700 /home/backup-pull/.ssh
+# One line: the forced command, then the backup host's public key.
+echo 'restrict,command="/usr/bin/rrsync -ro /var/backups/eduplatform" ssh-ed25519 AAAA... backup@backup-host' \
+  | sudo tee /home/backup-pull/.ssh/authorized_keys
+sudo chown backup-pull:backup-pull /home/backup-pull/.ssh/authorized_keys
+sudo chmod 600 /home/backup-pull/.ssh/authorized_keys
+```
+
+`rrsync -ro` (shipped with Ubuntu's `rsync` package) turns that key into
+read-only rsync inside that one directory: no shell, no writes, no paths outside
+it. If SSH is limited by `AllowUsers`/`AllowGroups` in `sshd_config`, or by UFW
+rules for port 22, allow `backup-pull` from the backup host's address.
+
+On the **backup host** (any Linux machine off this server with the disk space):
+
+```bash
+sudo apt install -y rsync postgresql-client   # pg_restore, to check each dump that arrives
+sudo install -o root -g root -m 0755 pull-eduplatform-backup.sh /usr/local/sbin/pull-eduplatform-backup
+sudo install -d -m 700 /srv/backups/trainings
+sudo ssh-keygen -t ed25519 -N '' -f /root/.ssh/trainings_backup   # its .pub goes into the line above
+sudo tee /etc/default/pull-eduplatform-backup >/dev/null <<'EOF'
+SOURCE=backup-pull@trainings.aztu.edu.az
+RSYNC_RSH="ssh -i /root/.ssh/trainings_backup"
+KEEP_DAYS=90
+EOF
+sudo pull-eduplatform-backup      # the first run asks you to accept the host key
+sudo tee /etc/cron.d/pull-eduplatform-backup >/dev/null <<'EOF'
+0 5 * * * root /usr/local/sbin/pull-eduplatform-backup 2>&1 | logger -t eduplatform-backup-pull
+EOF
+```
+
+It pulls only the run that `.last-success` names, so it never copies a backup
+that is still being written. It keeps its own 90 days and never deletes anything
+because the server did: there is no `--delete` anywhere in it.
+`pull-eduplatform-backup --check` is the same staleness check for this side.
+
+### Restore
+
+Drill it once on this server before you need it; an untested backup is not a
+backup. The script stops the backend, renames the live database to
+`eduplatform_pre_restore_<time>` instead of dropping it, restores into a fresh
+database owned by `eduplatform` in a single transaction, swaps the uploads, gives
+them back to `1001:1001`, starts the backend and waits for readiness. If the
+restore fails part way, it puts the old database back and restarts the backend.
+If the backend is not ready within 5 minutes, it exits non-zero and prints how to
+go back.
+
+```bash
+ls /var/backups/eduplatform/db/ /var/backups/eduplatform/uploads/
+sudo restore-eduplatform \
+  --db      /var/backups/eduplatform/db/eduplatform-<stamp>.dump \
+  --uploads /var/backups/eduplatform/uploads/<stamp>
+# Type RESTORE to confirm. Afterwards it prints the two commands that delete the
+# kept database and uploads directory, once you have checked the site.
+```
+
+Use the dump and the snapshot with the same `<stamp>`: the same run made them,
+minutes apart. Restoring from the backup host works the same way once the two
+files are copied back to this server. Leave out `--uploads` to restore only the
+database, for example after a bad migration (see the rollback section of
+[deployment.md](docs/operations/deployment.md#11-rollback)).
+
+To practise without touching production, restore into a scratch database
+instead:
 
 ```bash
 sudo -u postgres createdb eduplatform_restore_test
-sudo -u postgres pg_restore -d eduplatform_restore_test /var/backups/postgres/<file>.dump
+# Root opens the dump (postgres cannot read the backup directory) and hands it over
+# as stdin. A redirect rather than a pipe: pg_restore needs to seek in a
+# custom-format dump when it restores entries in a different order from the file.
+sudo sh -c 'runuser -u postgres -- pg_restore --exit-on-error -d eduplatform_restore_test \
+  < /var/backups/eduplatform/db/<file>.dump'
 sudo -u postgres dropdb eduplatform_restore_test
 ```
 
-Copy the dumps off this server. A backup on the same disk as the database only
-survives the failures that were never going to hurt you.
-
 ### Uploaded files are not in the dump
 
-`pg_dump` captures the `media_files` **rows** — id, object key, MIME type, size,
-SHA-256 — but not the bytes. With `STORAGE_PROVIDER=LOCAL` those live on disk at
-`STORAGE_LOCAL_DIR` (`/opt/uploads`). Restoring only the database therefore gives
-you a catalogue of thumbnails and lesson videos that all 404: every row still
-points at an object key that no longer exists on disk.
+`pg_dump` captures the `media_files` **rows** (id, object key, MIME type, size,
+SHA-256) but not the bytes. Those live on disk in `/opt/uploads`. Restoring only
+the database therefore gives you a catalogue of covers and lesson videos that all
+404, which is why the backup takes both in the same run.
 
-Back the directory up alongside the database, and from the same cron run so the
-two stay close enough in time to be useful together:
-
-```bash
-sudo -u postgres tee -a /usr/local/bin/backup-eduplatform.sh >/dev/null <<'EOF'
-tar -C /opt -czf "$DEST/uploads-$(date +%F-%H%M).tar.gz" uploads
-find "$DEST" -name 'uploads-*.tar.gz' -mtime +14 -delete
-EOF
-```
-
-The `postgres` user needs read access to `/opt/uploads` for this (the directory is
-owned by uid 1001, the container's app user), so either add `postgres` to that
-group or run the file half of the backup as root.
-
-A dump and a tarball taken minutes apart can still disagree: a file uploaded
-between the two exists on disk with no row, or has a row with no file. Neither
-breaks the application — an orphan file is inert and a row whose object key is
-missing surfaces as a 404 on that one asset — so it is not worth solving with
-snapshots. It is worth knowing before you are mid-restore and counting files.
+The dump and the snapshot are still taken minutes apart, so they can disagree
+slightly: a file uploaded between the two exists on disk with no row, or has a
+row with no file. Neither breaks the application. An orphan file is inert, and a
+row whose file is missing shows as a 404 on that one asset. It is not worth
+solving with filesystem snapshots, but it is worth knowing before you are
+mid-restore and counting files.
 
 ## 10. Sizing
 

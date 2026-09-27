@@ -21,7 +21,8 @@ public class Category extends SoftDeletable {
     @JoinColumn(name = "parent_id")
     private Category parent;
 
-    @Column(name = "slug", nullable = false, unique = true, length = 120)
+    // Unique among live categories only (uq_categories_slug_live, V16).
+    @Column(name = "slug", nullable = false, length = 120)
     private String slug;
 
     @Column(name = "name", nullable = false, length = 120)

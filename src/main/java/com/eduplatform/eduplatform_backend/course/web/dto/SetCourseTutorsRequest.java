@@ -18,6 +18,6 @@ import java.util.UUID;
  *                          editor who does not teach it.
  */
 public record SetCourseTutorsRequest(
-        @NotEmpty(message = "A course must have at least one tutor") Set<UUID> tutorIds,
+        @NotEmpty(message = "A course must have at least one tutor") Set<@NotNull UUID> tutorIds,
         @NotNull(message = "An authorised tutor must be nominated") UUID authorizedTutorId
 ) {}

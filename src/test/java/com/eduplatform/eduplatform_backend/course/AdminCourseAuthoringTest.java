@@ -263,8 +263,11 @@ class AdminCourseAuthoringTest extends AbstractIntegrationTest {
                 .send();
     }
 
+    /** An admin-made course with one lesson, so that it can be published. */
     private UUID adminCourse(String token, TestTutor tutor, Map<String, Object> course) {
-        return UUID.fromString(createAsAdmin(token, tutor, course).expectStatus(201).data().path("id").asText());
+        UUID id = UUID.fromString(createAsAdmin(token, tutor, course).expectStatus(201).data().path("id").asText());
+        ensureHasALesson(token, id);
+        return id;
     }
 
     private ApiClient.Response publishAsAdmin(String token, UUID courseId) {

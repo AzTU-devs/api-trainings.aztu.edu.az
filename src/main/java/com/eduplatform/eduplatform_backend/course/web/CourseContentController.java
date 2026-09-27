@@ -21,20 +21,25 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Tutor course-content management. All routes require {@code course:update_own};
- * the service additionally enforces that the caller owns the parent course.
+ * Course content management: modules and lessons. Open to tutors ({@code course:update_own}) and
+ * to admins ({@code course:manage}); the service decides per course — the editor or staff may
+ * change it, and the course's tutors or staff may read it. See CourseContentService.
  */
 @RestController
 @RequestMapping("/api/portal")
 @Tag(name = "Portal — Course content (modules & lessons)")
-@PreAuthorize("hasAuthority('course:update_own')")
+@PreAuthorize("hasAnyAuthority('course:update_own', 'course:manage')")
 public class CourseContentController {
 
     private static final String LESSON_MEDIA_RULES =
-            "videoMediaId must name media the caller uploaded (admins may use any), which has "
+            "videoMediaId must name media the caller uploaded, which has "
                     + "finished uploading and suits the contentType: a video for VIDEO, a PDF for PDF, "
                     + "and any stored image, video or PDF for TEXT, QUIZ and LIVE_SESSION. Otherwise "
                     + "404 MEDIA_NOT_FOUND, 403 MEDIA_FORBIDDEN or 422 INVALID_MEDIA_FOR_FIELD.";
+
+    private static final String ORDER_ASSIGNED =
+            " The new item is appended: its orderIndex is assigned by the server and the one in the "
+                    + "request is ignored.";
 
     private final CourseContentService service;
     private final CourseMapper mapper;
@@ -47,18 +52,20 @@ public class CourseContentController {
     // ---- modules ----
 
     @GetMapping("/courses/{courseId}/modules")
-    @Operation(summary = "List modules of a course")
-    public ApiResponse<List<ModuleDto>> listModules(@PathVariable UUID courseId) {
-        return ApiResponse.ok(service.listModules(courseId).stream().map(mapper::toModuleDto).toList());
+    @Operation(summary = "List modules of a course",
+            description = "For the course's tutors and admins; anyone else gets 404 COURSE_NOT_FOUND.")
+    public ApiResponse<List<ModuleDto>> listModules(@PathVariable UUID courseId,
+                                                    @CurrentUser AuthenticatedPrincipal me) {
+        return ApiResponse.ok(service.listModules(me, courseId).stream().map(mapper::toModuleDto).toList());
     }
 
     @PostMapping("/courses/{courseId}/modules")
-    @Operation(summary = "Add a module to a course")
+    @Operation(summary = "Add a module to a course", description = ORDER_ASSIGNED)
     public ResponseEntity<ApiResponse<ModuleDto>> addModule(@PathVariable UUID courseId,
                                                             @Valid @RequestBody ModuleUpsertRequest req,
                                                             @CurrentUser AuthenticatedPrincipal me) {
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(ApiResponse.ok(mapper.toModuleDto(service.addModule(me.userId(), courseId, req))));
+                .body(ApiResponse.ok(mapper.toModuleDto(service.addModule(me, courseId, req))));
     }
 
     @PutMapping("/modules/{moduleId}")
@@ -66,26 +73,28 @@ public class CourseContentController {
     public ApiResponse<ModuleDto> updateModule(@PathVariable UUID moduleId,
                                                @Valid @RequestBody ModuleUpsertRequest req,
                                                @CurrentUser AuthenticatedPrincipal me) {
-        return ApiResponse.ok(mapper.toModuleDto(service.updateModule(me.userId(), moduleId, req)));
+        return ApiResponse.ok(mapper.toModuleDto(service.updateModule(me, moduleId, req)));
     }
 
     @DeleteMapping("/modules/{moduleId}")
     @Operation(summary = "Delete a module")
     public ResponseEntity<Void> deleteModule(@PathVariable UUID moduleId, @CurrentUser AuthenticatedPrincipal me) {
-        service.deleteModule(me.userId(), moduleId);
+        service.deleteModule(me, moduleId);
         return ResponseEntity.noContent().build();
     }
 
     // ---- lessons ----
 
     @GetMapping("/modules/{moduleId}/lessons")
-    @Operation(summary = "List lessons of a module")
-    public ApiResponse<List<LessonDto>> listLessons(@PathVariable UUID moduleId) {
-        return ApiResponse.ok(service.listLessons(moduleId).stream().map(mapper::toLessonDto).toList());
+    @Operation(summary = "List lessons of a module",
+            description = "For the course's tutors and admins; anyone else gets 404 COURSE_NOT_FOUND.")
+    public ApiResponse<List<LessonDto>> listLessons(@PathVariable UUID moduleId,
+                                                    @CurrentUser AuthenticatedPrincipal me) {
+        return ApiResponse.ok(service.listLessons(me, moduleId).stream().map(mapper::toLessonDto).toList());
     }
 
     @PostMapping("/modules/{moduleId}/lessons")
-    @Operation(summary = "Add a lesson to a module", description = LESSON_MEDIA_RULES)
+    @Operation(summary = "Add a lesson to a module", description = LESSON_MEDIA_RULES + ORDER_ASSIGNED)
     public ResponseEntity<ApiResponse<LessonDto>> addLesson(@PathVariable UUID moduleId,
                                                             @Valid @RequestBody LessonUpsertRequest req,
                                                             @CurrentUser AuthenticatedPrincipal me) {
@@ -108,7 +117,7 @@ public class CourseContentController {
     @DeleteMapping("/lessons/{lessonId}")
     @Operation(summary = "Delete a lesson")
     public ResponseEntity<Void> deleteLesson(@PathVariable UUID lessonId, @CurrentUser AuthenticatedPrincipal me) {
-        service.deleteLesson(me.userId(), lessonId);
+        service.deleteLesson(me, lessonId);
         return ResponseEntity.noContent().build();
     }
 }

@@ -16,25 +16,38 @@ import java.util.stream.Collectors;
  * second password-reset mail twenty minutes after the first, while credential stuffing only pays
  * off at thousands of attempts a minute. Every default is overridable under
  * {@code app.ratelimit.rules.<key>} — campus traffic arrives NATed behind a handful of public
- * addresses, so a specific deployment may legitimately need a larger signup budget.
+ * addresses, so a specific deployment may legitimately need a larger signup budget. A key with
+ * no dash can be set from the environment (APP_RATELIMIT_RULES_LOGIN_CAPACITY=120); a dashed
+ * one such as register-tutor-start needs a properties entry or SPRING_APPLICATION_JSON.
  */
 public enum RateLimitRule {
 
-    /** The credential-stuffing target. 10/min still leaves a forgetful human several tries. */
+    /**
+     * The credential-stuffing target. Budgeted for a whole computer lab signing in at the start of
+     * a class from the campus's one NAT address; guessing any single account's password is held
+     * back by the per-account lockout (LoginSecurityService), not by this.
+     */
     LOGIN("login", HttpMethod.POST, "/api/auth/login",
-            10, Duration.ofMinutes(1)),
+            60, Duration.ofMinutes(1)),
 
-    /** Automated signups are cheap to create and expensive to clean up, hence an hour-long window. */
+    /**
+     * Automated signups are cheap to create and expensive to clean up, hence an hour-long window;
+     * sized for a class of thirty or so registering together behind one address.
+     */
     REGISTER("register", HttpMethod.POST, "/api/auth/register",
-            5, Duration.ofHours(1)),
+            60, Duration.ofHours(1)),
 
-    /** Sends an OTP mail, so the budget guards the outbound mail reputation as much as the account. */
+    /**
+     * Sends an OTP mail. Every resend counts, so the budget is several per applicant for a
+     * faculty's worth of applicants on one address; each address is additionally held to one code
+     * a minute and five an hour by TutorSignupService, which is what protects the mail reputation.
+     */
     REGISTER_TUTOR_START("register-tutor-start", HttpMethod.POST, "/api/auth/register/tutor/start",
-            5, Duration.ofHours(1)),
+            30, Duration.ofHours(1)),
 
     /** OTP guessing is already capped per signup; this only bounds the volume one address can drive. */
     REGISTER_TUTOR_VERIFY("register-tutor-verify", HttpMethod.POST, "/api/auth/register/tutor/verify",
-            10, Duration.ofHours(1)),
+            60, Duration.ofHours(1)),
 
     /** Same mail cost as the tutor flow, on an endpoint that mints privileged accounts. */
     ADMIN_REGISTER_START("admin-register-start", HttpMethod.POST, "/api/auth/admin/register/start",

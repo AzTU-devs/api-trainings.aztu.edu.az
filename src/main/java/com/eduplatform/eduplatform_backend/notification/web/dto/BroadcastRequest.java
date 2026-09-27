@@ -13,7 +13,7 @@ public record BroadcastRequest(
         @NotBlank String body,
         @NotNull Target target,
         RoleCode role,
-        Set<UUID> userIds
+        Set<@NotNull UUID> userIds
 ) {
     public enum Target { ALL, ROLE, USERS }
 }

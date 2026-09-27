@@ -35,16 +35,21 @@ public class AccountRecoveryService {
     private final RefreshTokenRepository refreshTokens;
     private final PasswordEncoder encoder;
     private final MailService mail;
+    private final UserSessionState sessions;
+    private final LoginSecurityService loginSecurity;
     private final String frontendBaseUrl;
 
     public AccountRecoveryService(UserRepository users, AuthActionTokenRepository tokens,
                                   RefreshTokenRepository refreshTokens, PasswordEncoder encoder, MailService mail,
+                                  UserSessionState sessions, LoginSecurityService loginSecurity,
                                   @Value("${app.frontend.public-url:http://localhost:3000}") String frontendBaseUrl) {
         this.users = users;
         this.tokens = tokens;
         this.refreshTokens = refreshTokens;
         this.encoder = encoder;
         this.mail = mail;
+        this.sessions = sessions;
+        this.loginSecurity = loginSecurity;
         this.frontendBaseUrl = frontendBaseUrl;
     }
 
@@ -53,7 +58,9 @@ public class AccountRecoveryService {
     public void requestPasswordReset(String email) {
         User user = users.findByEmailIgnoreCase(email).orElse(null);
         if (user == null || user.getPasswordHash() == null || user.getStatus() == UserStatus.DELETED) {
-            log.info("[password-reset] no eligible account for {}", email);
+            // No address in the line: anyone can post any address here, and the log is not the
+            // place to keep a list of the ones they tried.
+            log.debug("[password-reset] request for an address with no eligible account");
             return;
         }
         String raw = TokenHasher.randomToken(32);
@@ -74,7 +81,11 @@ public class AccountRecoveryService {
         if (user.getStatus() == UserStatus.LOCKED) {
             user.setStatus(UserStatus.ACTIVE);
         }
-        user.setFailedLogins((short) 0);
+        // Following the link proves the owner holds the mailbox, so every lockout on the address
+        // ends with the reset, from whichever client address it was.
+        loginSecurity.releaseAll(user);
+        // Whoever held the old password may hold a session too; its access tokens end with it.
+        sessions.revokeAccessTokens(user);
         users.save(user);
 
         tok.setConsumedAt(Instant.now());

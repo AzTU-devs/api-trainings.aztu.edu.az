@@ -304,9 +304,12 @@ class ExpertProfileEditTest extends AbstractIntegrationTest {
         assertThat(avatarInDb(tutor.profileId())).isNull();
     }
 
-    /** Unlike course media, an admin is not exempt from ownership: it must be their upload or the expert's. */
+    /**
+     * An admin sets a portrait they uploaded themselves, never one of the expert's own files: an
+     * expert's uploads are mostly private material, and an approved expert's avatar is public.
+     */
     @Test
-    void anAdminMayUseTheirOwnOrTheExpertsUploadButNotAThirdPartys() {
+    void anAdminMayUseTheirOwnUploadButNotTheExpertsOrAThirdPartys() {
         TestTutor tutor = newApprovedTutor("expert");
         String adminToken = newAdminToken();
         UUID adminsUpload = uploadMedia(adminToken, "portrait.png", "image/png", TestFiles.png());
@@ -316,8 +319,9 @@ class ExpertProfileEditTest extends AbstractIntegrationTest {
 
         patchAdmin(adminToken, tutor.profileId(), Json.object("avatarMediaId", thirdParty))
                 .expectError(403, "MEDIA_FORBIDDEN");
-        patchAdmin(adminToken, tutor.profileId(), Json.object("avatarMediaId", expertsUpload)).expectStatus(200);
-        assertThat(avatarInDb(tutor.profileId())).isEqualTo(expertsUpload);
+        patchAdmin(adminToken, tutor.profileId(), Json.object("avatarMediaId", expertsUpload))
+                .expectError(403, "MEDIA_FORBIDDEN");
+        assertThat(avatarInDb(tutor.profileId())).isNull();
         patchAdmin(adminToken, tutor.profileId(), Json.object("avatarMediaId", adminsUpload)).expectStatus(200);
         assertThat(avatarInDb(tutor.profileId())).isEqualTo(adminsUpload);
 
@@ -426,7 +430,9 @@ class ExpertProfileEditTest extends AbstractIntegrationTest {
 
         JsonNode profile = api.get("/api/public/tutors/" + tutor.profileId()).send().expectStatus(200).data();
 
-        assertThat(profile.path("avatarMediaId").asText()).isEqualTo(png.toString());
+        // The public profile describes the expert, not the account: no user id, no media id.
+        assertThat(profile.has("userId")).as("userId on the public profile").isFalse();
+        assertThat(profile.has("avatarMediaId")).as("avatarMediaId on the public profile").isFalse();
         assertThat(profile.path("avatarUrl").asText()).isEqualTo("/api/public/media/" + png + "/content");
         assertThat(profile.path("academicTitle").asText()).isEqualTo("Dosent");
         assertThat(profile.path("department").asText()).isEqualTo("Faculty of Information Technology");

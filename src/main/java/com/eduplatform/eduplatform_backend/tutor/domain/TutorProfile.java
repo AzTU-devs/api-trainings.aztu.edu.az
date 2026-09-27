@@ -8,6 +8,7 @@ import com.eduplatform.eduplatform_backend.media.domain.MediaFile;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.BatchSize;
+import org.hibernate.annotations.Formula;
 import org.hibernate.annotations.SQLDelete;
 import org.hibernate.annotations.SQLRestriction;
 
@@ -31,6 +32,17 @@ public class TutorProfile extends SoftDeletable {
     @OneToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "user_id", nullable = false, unique = true)
     private User user;
+
+    /**
+     * The expert's name as courses show it, read straight from the users row. Courses name their
+     * experts in every list and detail, and going through {@link #user} for it meant loading the
+     * account, which throws for an account deleted before deleting retired the profile with it
+     * (V21): one such expert turned the admin view of their courses into a 404. The subselect
+     * sees the row whether or not it is deleted, so such a course keeps its expert's name and can
+     * still be opened and reassigned. Never written.
+     */
+    @Formula("(select concat(u.first_name, ' ', u.last_name) from users u where u.id = user_id)")
+    private String displayName;
 
     @Column(name = "headline", length = 160)
     private String headline;

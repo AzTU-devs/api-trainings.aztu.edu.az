@@ -2,7 +2,6 @@ package com.eduplatform.eduplatform_backend.course.service;
 
 import com.eduplatform.eduplatform_backend.common.enums.LessonContentType;
 import com.eduplatform.eduplatform_backend.common.enums.MediaStatus;
-import com.eduplatform.eduplatform_backend.common.enums.RoleCode;
 import com.eduplatform.eduplatform_backend.common.error.AppException;
 import com.eduplatform.eduplatform_backend.common.error.Errors;
 import com.eduplatform.eduplatform_backend.common.security.AuthenticatedPrincipal;
@@ -24,8 +23,11 @@ import java.util.UUID;
  * <p>Attaching a file publishes it further than its owner chose: a published course's thumbnail
  * and trailer are served anonymously, and a lesson's file is streamed to every student enrolled
  * in the course. Without the ownership check a tutor could expose another user's private upload
- * just by naming its id. Admins are exempt — they assemble courses from whatever the university
- * has uploaded.
+ * just by naming its id. That holds for admins too: they may read every file, but a cover or a
+ * trailer they set on a course is published to anonymous visitors, so an admin free to name any
+ * id could publish anybody's private upload — a scan an expert kept for themselves, say. The
+ * dashboard always uploads a fresh file as the person editing, and an id a course already has is
+ * never re-checked (see CourseService.applyUpdate), so nothing legitimate needs the exemption.
  *
  * <p>The kind comes from the stored MIME type through the upload allowlist, the same table the
  * upload endpoints validate against, so a row that predates the allowlist cannot be attached
@@ -74,14 +76,14 @@ public class CourseMediaValidator {
 
     /**
      * Loads the media a field is being pointed at, or null for no id: 404 MEDIA_NOT_FOUND if it
-     * does not exist, 403 MEDIA_FORBIDDEN if the caller neither owns it nor is an admin, and
+     * does not exist, 403 MEDIA_FORBIDDEN if the caller did not upload it, and
      * 422 INVALID_MEDIA_FOR_FIELD unless it has finished uploading and is of a kind the field
      * accepts.
      */
     public MediaFile resolve(UUID mediaId, MediaField field, AuthenticatedPrincipal caller) {
         if (mediaId == null) return null;
         MediaFile m = media.findById(mediaId).orElseThrow(() -> notFound(mediaId));
-        if (!isAdmin(caller) && !Objects.equals(caller.userId(), m.getOwnerUserId())) {
+        if (!Objects.equals(caller.userId(), m.getOwnerUserId())) {
             throw Errors.forbidden("MEDIA_FORBIDDEN",
                     field.property() + " must refer to media you uploaded yourself");
         }
@@ -126,8 +128,4 @@ public class CourseMediaValidator {
         return Errors.notFound("MEDIA_NOT_FOUND", "Media " + mediaId + " does not exist");
     }
 
-    private static boolean isAdmin(AuthenticatedPrincipal caller) {
-        return caller.roles().contains(RoleCode.ADMIN.name())
-                || caller.roles().contains(RoleCode.SUPER_ADMIN.name());
-    }
 }

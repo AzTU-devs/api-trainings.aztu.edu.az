@@ -94,6 +94,15 @@ public class CourseAdminController {
         return ApiResponse.ok(mapper.toDto(service.unpublish(id)));
     }
 
+    @PostMapping("/{id}/archive")
+    @PreAuthorize("hasAuthority('course:publish')")
+    @Operation(summary = "Archive any course",
+            description = "Takes the course out of the catalogue for good. A course that was ever "
+                    + "published stays reachable by slug for the participants who hold a place on it.")
+    public ApiResponse<CourseDto> archive(@PathVariable UUID id) {
+        return ApiResponse.ok(mapper.toDto(service.archiveByAdmin(id)));
+    }
+
     @PutMapping("/{id}/tutors")
     @PreAuthorize("hasAuthority('course:manage')")
     @Operation(summary = "Replace a course's teaching roster and nominate its authorised editor",

@@ -28,14 +28,14 @@ public class CategoryPublicController {
     }
 
     @GetMapping
-    @Operation(summary = "List top-level categories", security = {})
+    @Operation(summary = "List active top-level categories", security = {})
     public ApiResponse<List<CategoryDto>> roots() {
-        return ApiResponse.ok(service.roots().stream().map(mapper::toCategoryDto).toList());
+        return ApiResponse.ok(service.publicRoots().stream().map(mapper::toCategoryDto).toList());
     }
 
     @GetMapping("/{id}/children")
-    @Operation(summary = "List immediate sub-categories", security = {})
+    @Operation(summary = "List active immediate sub-categories", security = {})
     public ApiResponse<List<CategoryDto>> children(@PathVariable UUID id) {
-        return ApiResponse.ok(service.children(id).stream().map(mapper::toCategoryDto).toList());
+        return ApiResponse.ok(service.publicChildren(id).stream().map(mapper::toCategoryDto).toList());
     }
 }

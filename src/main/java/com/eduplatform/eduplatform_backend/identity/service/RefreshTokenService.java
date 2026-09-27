@@ -1,5 +1,6 @@
 package com.eduplatform.eduplatform_backend.identity.service;
 
+import com.eduplatform.eduplatform_backend.audit.service.HttpMeta;
 import com.eduplatform.eduplatform_backend.common.enums.TokenRevokeReason;
 import com.eduplatform.eduplatform_backend.common.error.AppException;
 import com.eduplatform.eduplatform_backend.common.error.Errors;
@@ -8,6 +9,7 @@ import com.eduplatform.eduplatform_backend.common.security.config.JwtProperties;
 import com.eduplatform.eduplatform_backend.identity.domain.RefreshToken;
 import com.eduplatform.eduplatform_backend.identity.domain.User;
 import com.eduplatform.eduplatform_backend.identity.repo.RefreshTokenRepository;
+import com.eduplatform.eduplatform_backend.identity.repo.UserRepository;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import jakarta.servlet.http.HttpServletRequest;
@@ -19,6 +21,11 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.UUID;
 
 /**
@@ -49,6 +56,9 @@ public class RefreshTokenService {
      */
     static final Duration CONCURRENT_ROTATION_GRACE = Duration.ofSeconds(30);
 
+    /** How long a replay waits for a concurrent rotation to finish committing; see awaitGraceReply. */
+    private static final Duration GRACE_REPLY_WAIT = Duration.ofSeconds(2);
+
     /**
      * Rotated token id → the child that rotation handed out, kept for the grace window.
      *
@@ -63,17 +73,25 @@ public class RefreshTokenService {
      * <p>Single instance assumed. Behind two API instances a replay landing on the other one finds
      * no entry and is treated as reuse, ending the session; moving this to a shared store (or
      * sticky sessions) is what a second instance would need.
+     *
+     * <p>The value is a future, put in place while the rotation is still in its transaction and
+     * completed once it commits (see {@link #rememberForGrace}). Publishing only after the commit
+     * left a gap: a replay could read the committed ROTATED row, find no entry yet, and revoke the
+     * whole family as reused — signing the user out everywhere in exactly the multi-tab burst the
+     * window exists for.
      */
-    private final Cache<UUID, GraceReply> rotationReplies = Caffeine.newBuilder()
+    private final Cache<UUID, CompletableFuture<GraceReply>> rotationReplies = Caffeine.newBuilder()
             .expireAfterWrite(CONCURRENT_ROTATION_GRACE)
             .maximumSize(100_000)
             .build();
 
     private final RefreshTokenRepository repo;
+    private final UserRepository users;
     private final Duration ttl;
 
-    public RefreshTokenService(RefreshTokenRepository repo, JwtProperties jwt) {
+    public RefreshTokenService(RefreshTokenRepository repo, UserRepository users, JwtProperties jwt) {
         this.repo = repo;
+        this.users = users;
         this.ttl = Duration.ofDays(jwt.refreshTtlDays());
     }
 
@@ -97,6 +115,7 @@ public class RefreshTokenService {
     public Rotated rotate(String rawToken, HttpServletRequest req) {
         RefreshToken stored = repo.findByTokenHash(TokenHasher.sha256Hex(rawToken))
                 .orElseThrow(RefreshTokenService::invalid);
+        User owner = requireSignInAllowed(stored);
         Instant now = Instant.now();
 
         Instant revokedAt = stored.getRevokedAt();
@@ -106,7 +125,7 @@ public class RefreshTokenService {
                 throw expired();
             }
             if (repo.revokeIfActive(stored.getId(), TokenRevokeReason.ROTATED, now) == 1) {
-                return persist(stored.getUser(), stored.getFamilyId(), stored.getId(), req);
+                return persist(owner, stored.getFamilyId(), stored.getId(), req);
             }
             // Another request revoked it between our read and our update. `stored` still holds
             // what we read, so take the revocation from the row as that request committed it.
@@ -120,13 +139,13 @@ public class RefreshTokenService {
             if (now.isAfter(stored.getExpiresAt())) {
                 throw expired();
             }
-            GraceReply reply = rotationReplies.getIfPresent(stored.getId());
+            GraceReply reply = awaitGraceReply(rotationReplies.getIfPresent(stored.getId()));
             // The child has to still be usable. Checking it rather than the family answers the
             // question that matters — can the caller actually use what we are about to return —
             // and it refuses to reopen a session that logout, a password reset or an earlier reuse
             // has already ended.
             if (reply != null && repo.existsByIdAndRevokedAtIsNullAndExpiresAtAfter(reply.childId(), now)) {
-                return new Rotated(reply.rawToken(), reply.expiresAt(), stored.getUser());
+                return new Rotated(reply.rawToken(), reply.expiresAt(), owner);
             }
         }
 
@@ -139,17 +158,62 @@ public class RefreshTokenService {
 
     /**
      * Revokes the token if it is still live. A token that is already revoked keeps its original
-     * reason, so a logout racing a rotation cannot relabel the ROTATED mark.
+     * reason, so a logout racing a rotation cannot relabel the ROTATED mark. Returns the owner's
+     * id when this call is what revoked it.
      */
     @Transactional
-    public void revoke(String rawToken, TokenRevokeReason reason) {
-        repo.findByTokenHash(TokenHasher.sha256Hex(rawToken))
-                .ifPresent(t -> repo.revokeIfActive(t.getId(), reason, Instant.now()));
+    public Optional<UUID> revoke(String rawToken, TokenRevokeReason reason) {
+        return repo.findByTokenHash(TokenHasher.sha256Hex(rawToken))
+                .filter(t -> repo.revokeIfActive(t.getId(), reason, Instant.now()) == 1)
+                // The id off the lazy proxy; the account itself is not loaded.
+                .map(t -> t.getUser().getId());
     }
 
     @Transactional
     public void revokeAllForUser(UUID userId, TokenRevokeReason reason) {
         repo.revokeAllForUser(userId, reason, Instant.now());
+    }
+
+    /**
+     * Revokes every session of the user except the one {@code keepRawToken} belongs to — if it is
+     * the user's own — so a password change signs out every other device and not the one making it.
+     */
+    @Transactional
+    public void revokeOtherSessions(UUID userId, String keepRawToken, TokenRevokeReason reason) {
+        UUID keepFamily = keepRawToken == null ? null : repo.findByTokenHash(TokenHasher.sha256Hex(keepRawToken))
+                .filter(t -> t.getUser().getId().equals(userId))
+                .map(RefreshToken::getFamilyId)
+                .orElse(null);
+        if (keepFamily == null) {
+            repo.revokeAllForUser(userId, reason, Instant.now());
+        } else {
+            repo.revokeAllForUserExceptFamily(userId, keepFamily, reason, Instant.now());
+        }
+    }
+
+    /**
+     * The token's owner, provided the account may still hold a session. Sign-in checks the
+     * account's status, and a refresh is a sign-in that skips the password, so it has to check the
+     * same thing — or disabling an account ends nothing: every rotation hands out another 30-day
+     * token, and the session outlives the decision indefinitely.
+     *
+     * <p>Loaded with a query rather than through {@code stored.getUser()}: the association is a lazy
+     * proxy, and for a soft-deleted account {@code @SQLRestriction} makes initialising it throw
+     * EntityNotFoundException, which surfaced as a 500 and rolled the rotation back. Reading the id
+     * off the proxy does not initialise it.
+     *
+     * <p>LOCKED is let through. A lockout stops password guessing; refusing the real owner's
+     * refresh because a stranger typed their address wrong five times would hand that stranger a
+     * way to sign anyone out. The inside of the grace window is checked too, because it is reached
+     * through here.
+     */
+    private User requireSignInAllowed(RefreshToken stored) {
+        User owner = users.findById(stored.getUser().getId())
+                .orElseThrow(RefreshTokenService::invalid);
+        if (!UserSessionState.isSignInStatus(owner.getStatus())) {
+            throw Errors.unauthorized("ACCOUNT_NOT_ACTIVE", "This account is disabled");
+        }
+        return owner;
     }
 
     private static boolean isRecentRotation(TokenRevokeReason reason, Instant revokedAt, Instant now) {
@@ -171,7 +235,7 @@ public class RefreshTokenService {
                 .parentId(parentId)
                 .issuedAt(now)
                 .expiresAt(exp)
-                .ipAddress(req == null ? null : req.getRemoteAddr())
+                .ipAddress(HttpMeta.clientIp(req))
                 .userAgent(req == null ? null : truncate(req.getHeader("User-Agent"), 255))
                 .build();
         repo.save(token);
@@ -183,20 +247,47 @@ public class RefreshTokenService {
     }
 
     /**
-     * Publishes the reply only once the rotation is committed. Caching it earlier would let a replay
-     * be handed a token whose INSERT then rolled back — a token the caller could never use.
+     * Registers the reply as a future before the rotation commits and completes it once it has.
+     * Registered first, so a replay that sees the committed ROTATED row always finds it; completed
+     * only on commit, so a replay is never handed a token whose INSERT then rolled back — a token
+     * the caller could never use. A rolled-back rotation withdraws the entry and fails the future,
+     * and the replay is then judged like any other.
      */
     private void rememberForGrace(UUID parentId, GraceReply reply) {
+        CompletableFuture<GraceReply> pending = new CompletableFuture<>();
+        rotationReplies.put(parentId, pending);
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            rotationReplies.put(parentId, reply);
+            pending.complete(reply);
             return;
         }
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
-            public void afterCommit() {
-                rotationReplies.put(parentId, reply);
+            public void afterCompletion(int status) {
+                if (status == STATUS_COMMITTED) {
+                    pending.complete(reply);
+                } else {
+                    rotationReplies.asMap().remove(parentId, pending);
+                    pending.completeExceptionally(new IllegalStateException("rotation rolled back"));
+                }
             }
         });
+    }
+
+    /**
+     * The rotation's reply once it has committed. Waited for briefly: a replay only finds a future
+     * that is still pending in the moment between the rotation's COMMIT and its completion, so the
+     * wait is normally microseconds; the timeout only bounds a rotation that is stuck.
+     */
+    private static GraceReply awaitGraceReply(CompletableFuture<GraceReply> pending) {
+        if (pending == null) return null;
+        try {
+            return pending.get(GRACE_REPLY_WAIT.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        } catch (ExecutionException | TimeoutException rolledBackOrStuck) {
+            return null;
+        }
     }
 
     private static AppException invalid() {

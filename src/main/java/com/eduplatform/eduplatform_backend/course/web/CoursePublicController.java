@@ -74,12 +74,21 @@ public class CoursePublicController {
                     + "archived, are served to anyone; archived ones are left out of the catalogue but "
                     + "stay reachable here for the students enrolled in them. A DRAFT, IN_REVIEW or "
                     + "REJECTED course, or an archived one that was never published, is served only when "
-                    + "the request carries a bearer token belonging to one of the course's tutors or to "
-                    + "an admin, and is otherwise a 404 COURSE_NOT_FOUND, the same as a slug that does "
-                    + "not exist.",
+                    + "the request carries a bearer token belonging to one of the course's tutors, to "
+                    + "an admin, or to a participant holding an ACTIVE or COMPLETED enrolment, and is "
+                    + "otherwise a 404 COURSE_NOT_FOUND, the same as a slug that does not exist. "
+                    + "Every caller gets the full outline, but a lesson's description, videoUrl and "
+                    + "videoMediaId only for preview lessons unless the token belongs to a tutor, an "
+                    + "admin or such a participant; rejectionReason is only for tutors and admins.",
             security = {})
     public ApiResponse<CourseDto> bySlug(@PathVariable String slug) {
-        return ApiResponse.ok(mapper.toDto(service.getBySlug(slug, optionalCaller())));
+        CourseService.SlugView view = service.getBySlug(slug, optionalCaller());
+        CourseDto dto = mapper.toDto(view.course());
+        // The lessons' content is what a participant is given, and it used to be handed to every
+        // anonymous caller in full — meeting links, texts and file ids of paid courses included.
+        if (!view.fullLessonContent()) dto = dto.withLessonContentHidden();
+        if (!view.moderationNote()) dto = dto.withoutModerationNote();
+        return ApiResponse.ok(dto);
     }
 
     /**

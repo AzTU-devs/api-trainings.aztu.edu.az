@@ -2,6 +2,7 @@ package com.eduplatform.eduplatform_backend.audit.web;
 
 import com.eduplatform.eduplatform_backend.audit.service.SecurityService;
 import com.eduplatform.eduplatform_backend.audit.web.dto.BlockIpRequest;
+import com.eduplatform.eduplatform_backend.audit.web.dto.BlockedIpDto;
 import com.eduplatform.eduplatform_backend.audit.web.dto.SecurityEventDto;
 import com.eduplatform.eduplatform_backend.audit.web.dto.SecurityOverviewDto;
 import com.eduplatform.eduplatform_backend.common.security.AuthenticatedPrincipal;
@@ -18,6 +19,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 import java.util.UUID;
 
 @RestController
@@ -48,11 +50,29 @@ public class SecurityController {
     }
 
     @PostMapping("/block-ip")
-    @Operation(summary = "Block an IP address from reaching the API")
+    @Operation(summary = "Block an IP address from reaching the API",
+            description = "A single IPv4 or IPv6 address, stored in canonical form; anything else, ranges "
+                    + "included, is 400 INVALID_IP. Your own address and loopback are refused "
+                    + "(400 CANNOT_BLOCK_SELF / CANNOT_BLOCK_LOOPBACK). Takes effect immediately.")
     public ResponseEntity<Void> blockIp(@Valid @RequestBody BlockIpRequest req,
                                         @CurrentUser AuthenticatedPrincipal me,
                                         HttpServletRequest http) {
         service.blockIp(req.ipAddress(), req.reason(), me.userId(), http);
+        return ResponseEntity.noContent().build();
+    }
+
+    @GetMapping("/blocked-ips")
+    @Operation(summary = "List blocked IP addresses, newest first")
+    public ApiResponse<List<BlockedIpDto>> blockedIps() {
+        return ApiResponse.ok(service.listBlockedIps());
+    }
+
+    @DeleteMapping("/blocked-ips/{id}")
+    @Operation(summary = "Unblock an IP address", description = "Takes effect immediately.")
+    public ResponseEntity<Void> unblockIp(@PathVariable UUID id,
+                                          @CurrentUser AuthenticatedPrincipal me,
+                                          HttpServletRequest http) {
+        service.unblockIp(id, me.userId(), http);
         return ResponseEntity.noContent().build();
     }
 

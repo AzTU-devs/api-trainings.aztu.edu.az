@@ -2,6 +2,8 @@ package com.eduplatform.eduplatform_backend.identity.service;
 
 import com.eduplatform.eduplatform_backend.catalog.repo.CategoryRepository;
 import com.eduplatform.eduplatform_backend.common.enums.TutorApprovalStatus;
+import com.eduplatform.eduplatform_backend.catalog.domain.Category;
+import com.eduplatform.eduplatform_backend.common.error.AppException;
 import com.eduplatform.eduplatform_backend.common.error.Errors;
 import com.eduplatform.eduplatform_backend.common.security.TokenHasher;
 import com.eduplatform.eduplatform_backend.identity.domain.TutorRegistrationOtp;
@@ -17,6 +19,8 @@ import com.eduplatform.eduplatform_backend.tutor.service.TutorService;
 import com.eduplatform.eduplatform_backend.tutor.web.dto.TutorApplyRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -43,6 +47,8 @@ public class TutorSignupService {
     private static final Duration OTP_TTL = Duration.ofMinutes(10);
     private static final int OTP_LENGTH = 6;
     private static final short MAX_ATTEMPTS = 5;
+    private static final Duration RESEND_COOLDOWN = Duration.ofSeconds(60);
+    private static final int MAX_CODES_PER_HOUR = 5;
 
     private final TutorRegistrationOtpRepository otps;
     private final UserRepository users;
@@ -65,15 +71,36 @@ public class TutorSignupService {
         this.mail = mail;
     }
 
+    /**
+     * Stores the application and mails a code. Also the "resend code" path, so each address is
+     * held to one code a minute and {@link #MAX_CODES_PER_HOUR} an hour: the per-IP rate limit
+     * alone would let one visitor mail any address repeatedly, and it is loose on purpose, since
+     * a whole classroom signs up from the campus's one NAT address.
+     */
     @Transactional
     public OtpStartResponse start(TutorRegisterRequest req) {
         if (users.existsByEmailIgnoreCase(req.email())) {
             throw Errors.conflict("EMAIL_ALREADY_REGISTERED", "An account with this email already exists");
         }
         for (UUID categoryId : req.categoryIds()) {
-            if (!categories.existsById(categoryId)) {
-                throw Errors.badRequest("INVALID_CATEGORY", "Unknown category: " + categoryId);
+            // TutorRegisterRequest refuses a null id already; this keeps findById from turning one
+            // that got past it into a server error.
+            if (categoryId == null) {
+                throw Errors.badRequest("INVALID_CATEGORY", "Unknown category: null");
             }
+            Category category = categories.findById(categoryId)
+                    .orElseThrow(() -> Errors.badRequest("INVALID_CATEGORY", "Unknown category: " + categoryId));
+            if (!category.isActive()) {
+                throw Errors.badRequest("CATEGORY_INACTIVE", "Category " + category.getName() + " is not offered");
+            }
+        }
+        Instant issuedBefore = Instant.now();
+        Instant last = otps.lastIssuedAt(req.email()).orElse(null);
+        if (last != null && last.isAfter(issuedBefore.minus(RESEND_COOLDOWN))) {
+            throw tooSoon(Duration.between(issuedBefore, last.plus(RESEND_COOLDOWN)));
+        }
+        if (otps.countIssuedSince(req.email(), issuedBefore.minus(Duration.ofHours(1))) >= MAX_CODES_PER_HOUR) {
+            throw tooSoon(Duration.ofHours(1));
         }
         // Revoke any prior pending OTP so only the freshest one is valid.
         otps.findActiveByEmail(req.email()).ifPresent(o -> {
@@ -91,11 +118,14 @@ public class TutorSignupService {
                 .lastName(req.lastName())
                 .phone(req.phone())
                 .passwordHash(encoder.encode(req.password()))
-                .headline(req.headline())
-                .bio(req.bio())
+                .headline(trimToNull(req.headline()))
+                .bio(trimToNull(req.bio()))
                 .yearsExperience(req.yearsExperience())
-                .websiteUrl(req.websiteUrl())
-                .linkedinUrl(req.linkedinUrl())
+                // Stored trimmed, blank as nothing: the values are validated as web addresses,
+                // and a blank field means the applicant left it empty.
+                .websiteUrl(trimToNull(req.websiteUrl()))
+                .linkedinUrl(trimToNull(req.linkedinUrl()))
+                .locale(normalisedLocale(req.locale()))
                 .categoryIds(req.categoryIds().stream().map(UUID::toString).toList())
                 .otpHash(TokenHasher.sha256Hex(otp))
                 .attempts((short) 0)
@@ -140,10 +170,17 @@ public class TutorSignupService {
 
         User user = authService.createUserWithUserRolePreHashed(
                 row.getEmail(), row.getPasswordHash(), row.getFirstName(),
-                row.getLastName(), row.getPhone(), "en");
+                row.getLastName(), row.getPhone(), normalisedLocale(row.getLocale()));
+        // The code just proved the applicant reads this inbox, which is what verifying an email
+        // address means; the dashboard used to show every expert who signed up as "Unverified".
+        user.setEmailVerifiedAt(Instant.now());
 
         Set<UUID> categoryIds = new LinkedHashSet<>();
         for (String id : row.getCategoryIds()) categoryIds.add(UUID.fromString(id));
+        // The start step checked these; one an admin has hidden or deleted in the minutes since is
+        // dropped rather than failing the sign-up after the code was already proven, the same way
+        // apply() drops stored links that no longer pass.
+        categoryIds.removeIf(id -> categories.findById(id).map(c -> !c.isActive()).orElse(true));
 
         TutorProfile profile = tutorService.apply(user.getId(), new TutorApplyRequest(
                 row.getHeadline(), row.getBio(), row.getYearsExperience(),
@@ -161,6 +198,23 @@ public class TutorSignupService {
 
     private void sendOtp(String email, String otp) {
         mail.sendOtp(email, otp, "tutor registration", OTP_TTL.toMinutes());
+    }
+
+    private static AppException tooSoon(Duration wait) {
+        long seconds = Math.max(1, wait.toSeconds());
+        HttpHeaders headers = new HttpHeaders();
+        headers.set(HttpHeaders.RETRY_AFTER, Long.toString(seconds));
+        return new AppException(HttpStatus.TOO_MANY_REQUESTS, "OTP_RESEND_TOO_SOON",
+                "A code was sent to this address moments ago; wait before asking for another", headers);
+    }
+
+    private static String trimToNull(String value) {
+        return value == null || value.isBlank() ? null : value.trim();
+    }
+
+    /** az or en, the languages the site is in; anything else, or nothing, is English. */
+    private static String normalisedLocale(String locale) {
+        return locale != null && locale.trim().equalsIgnoreCase("az") ? "az" : "en";
     }
 
     private static String generateNumericOtp() {

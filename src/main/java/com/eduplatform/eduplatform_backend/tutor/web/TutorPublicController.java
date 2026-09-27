@@ -2,7 +2,7 @@ package com.eduplatform.eduplatform_backend.tutor.web;
 
 import com.eduplatform.eduplatform_backend.common.web.ApiResponse;
 import com.eduplatform.eduplatform_backend.tutor.service.TutorService;
-import com.eduplatform.eduplatform_backend.tutor.web.dto.TutorProfileDto;
+import com.eduplatform.eduplatform_backend.tutor.web.dto.TutorPublicProfileDto;
 import com.eduplatform.eduplatform_backend.tutor.web.mapper.TutorMapper;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -28,7 +28,7 @@ public class TutorPublicController {
 
     @GetMapping("/{id}")
     @Operation(summary = "Public profile of an approved tutor", security = {})
-    public ApiResponse<TutorProfileDto> get(@PathVariable UUID id) {
-        return ApiResponse.ok(mapper.toDto(service.publicProfile(id)));
+    public ApiResponse<TutorPublicProfileDto> get(@PathVariable UUID id) {
+        return ApiResponse.ok(mapper.toPublicDto(service.publicProfile(id)));
     }
 }

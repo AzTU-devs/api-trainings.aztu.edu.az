@@ -11,8 +11,9 @@ import java.util.HashSet;
 import java.util.Set;
 
 @Entity
-@Table(name = "course_modules",
-        uniqueConstraints = @UniqueConstraint(name = "uq_course_modules_order", columnNames = {"course_id", "order_index"}))
+// Positions are unique among live modules only: a partial index since V16 (Flyway owns the
+// schema; see CourseContentService.addModule for how positions are assigned).
+@Table(name = "course_modules")
 @Getter
 @Setter
 @NoArgsConstructor

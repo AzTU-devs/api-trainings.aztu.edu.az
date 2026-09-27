@@ -9,8 +9,8 @@ import org.hibernate.annotations.SQLDelete;
 import org.hibernate.annotations.SQLRestriction;
 
 @Entity
-@Table(name = "lessons",
-        uniqueConstraints = @UniqueConstraint(name = "uq_lessons_module_order", columnNames = {"module_id", "order_index"}))
+// Positions are unique among a module's live lessons only: a partial index since V16.
+@Table(name = "lessons")
 @Getter
 @Setter
 @NoArgsConstructor

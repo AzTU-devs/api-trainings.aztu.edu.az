@@ -2,10 +2,12 @@ package com.eduplatform.eduplatform_backend.tutor.web.dto;
 
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import lombok.AccessLevel;
 import lombok.Getter;
+import lombok.Setter;
 
 import java.util.EnumSet;
 import java.util.Set;
@@ -95,7 +97,16 @@ public class UpdateTutorProfileRequest {
     private String githubUrl;
 
     @Size(min = 1, message = "must name at least one area of expertise")
-    private Set<UUID> expertiseCategoryIds;
+    private Set<@NotNull UUID> expertiseCategoryIds;
+
+    /**
+     * The profile's version as last read. When sent, a save based on an out-of-date copy is refused
+     * with 409 STALE_RESOURCE instead of silently overwriting what an admin or the expert saved in
+     * between; omitted, the edit is applied without that check. Not a clearable property, so it is
+     * not recorded in {@link #present}.
+     */
+    @Setter
+    private Long version;
 
     /** Whether the body contained this property at all, explicit null included. */
     public boolean has(Field field) {

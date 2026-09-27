@@ -57,7 +57,8 @@ public class CourseParticipantAdminController {
     @DeleteMapping("/{userId}")
     @PreAuthorize("hasAuthority('enrollment:manage')")
     @Operation(summary = "Take a participant off the course",
-            description = "Cancels the enrolment; progress, attendance and certificates are kept.")
+            description = "Cancels the enrolment; progress and attendance are kept. A cancelled "
+                    + "enrolment grants nothing: no lesson content, no progress, no review.")
     public ResponseEntity<Void> remove(@PathVariable UUID courseId, @PathVariable UUID userId) {
         service.removeParticipant(courseId, userId);
         return ResponseEntity.noContent().build();

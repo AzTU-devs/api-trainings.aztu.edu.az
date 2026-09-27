@@ -30,10 +30,15 @@ COPY --from=build --chown=app:app /workspace/target/extracted/spring-boot-loader
 COPY --from=build --chown=app:app /workspace/target/extracted/snapshot-dependencies/ ./
 COPY --from=build --chown=app:app /workspace/target/extracted/application/          ./
 
+# 75% of the memory the container can see. That is only a sensible heap when the
+# container has a limit: without one it is 75% of the whole host. docker-compose.prod.yml
+# sets mem_limit for that reason.
 ENV JAVA_OPTS="-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/./urandom"
 
 # Deployed images run production config unless explicitly overridden. Critically this
 # keeps classpath:db/dev (seed ADMIN/SUPER_ADMIN accounts) off the Flyway path.
+# Any runtime value beats this ENV, including a SPRING_PROFILES_ACTIVE line in an
+# --env-file or compose env_file, which is why docker-compose.prod.yml pins it again.
 ENV SPRING_PROFILES_ACTIVE=prod
 
 # Uploads. LOCAL is the only implemented storage provider, so this directory IS the

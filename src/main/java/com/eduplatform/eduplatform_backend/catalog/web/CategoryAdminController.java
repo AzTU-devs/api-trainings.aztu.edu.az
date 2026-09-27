@@ -13,6 +13,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 import java.util.UUID;
 
 @RestController
@@ -27,6 +28,13 @@ public class CategoryAdminController {
     public CategoryAdminController(CategoryService service, CatalogMapper mapper) {
         this.service = service;
         this.mapper = mapper;
+    }
+
+    @GetMapping
+    @Operation(summary = "List every category, flat, hidden ones and sub-categories included",
+            description = "Each entry carries parentId, so the tree can be built client-side.")
+    public ApiResponse<List<CategoryDto>> list() {
+        return ApiResponse.ok(service.all().stream().map(mapper::toCategoryDto).toList());
     }
 
     @PostMapping

@@ -86,10 +86,36 @@ public interface CourseRepository extends JpaRepository<Course, UUID>, JpaSpecif
            """)
     boolean isPublishedCourseAsset(@Param("mediaId") UUID mediaId);
 
-    @Query("select count(c) from Course c where c.tutor.user.id = :userId")
+    /**
+     * True if {@code mediaId} is the thumbnail or trailer of a course the user teaches, as its
+     * authorised editor or on its roster, whatever the course's status.
+     */
+    @Query("""
+           select case when count(c) > 0 then true else false end
+           from Course c left join c.tutors t
+           where (c.thumbnail.id = :mediaId or c.trailer.id = :mediaId)
+             and (c.tutor.user.id = :userId or t.user.id = :userId)
+           """)
+    boolean isCourseAssetOfTutor(@Param("mediaId") UUID mediaId, @Param("userId") UUID userId);
+
+    /**
+     * Courses the user teaches: as the authorised editor or on the roster. Co-tutors used to be
+     * display-only, missing from their own dashboard counts; EXISTS rather than a join so that a
+     * course is counted once however it is reached.
+     */
+    @Query("""
+           select count(c) from Course c
+           where c.tutor.user.id = :userId
+              or exists (select 1 from c.tutors t where t.user.id = :userId)
+           """)
     long countByTutorUser(@Param("userId") UUID userId);
 
-    @Query("select count(c) from Course c where c.tutor.user.id = :userId and c.status = :status")
+    @Query("""
+           select count(c) from Course c
+           where c.status = :status
+             and (c.tutor.user.id = :userId
+                  or exists (select 1 from c.tutors t where t.user.id = :userId))
+           """)
     long countByTutorUserAndStatus(@Param("userId") UUID userId, @Param("status") CourseStatus status);
 
     @Query("""
@@ -107,6 +133,20 @@ public interface CourseRepository extends JpaRepository<Course, UUID>, JpaSpecif
            """)
     List<TopCategoryView> findTopCategories(@Param("status") CourseStatus status, Pageable pageable);
 
+    /** Clears a deleted file from every course that has it as its cover; see VideoService.delete. */
+    @Modifying
+    @Query(value = "update courses set thumbnail_media_id = null where thumbnail_media_id = :mediaId", nativeQuery = true)
+    int detachThumbnail(@Param("mediaId") UUID mediaId);
+
+    /** Clears a deleted file from every course that has it as its trailer. */
+    @Modifying
+    @Query(value = "update courses set trailer_media_id = null where trailer_media_id = :mediaId", nativeQuery = true)
+    int detachTrailer(@Param("mediaId") UUID mediaId);
+
+    /** Row-locks the course until the transaction ends, so two module adds cannot share a position. */
+    @Query(value = "select 1 from courses where id = :id for update", nativeQuery = true)
+    Integer lockForContentChange(@Param("id") UUID id);
+
     @Modifying
     @Query("update Course c set c.enrolledCount = c.enrolledCount + 1 where c.id = :id")
     int incrementEnrolledCount(@Param("id") UUID id);
@@ -114,4 +154,21 @@ public interface CourseRepository extends JpaRepository<Course, UUID>, JpaSpecif
     @Modifying
     @Query("update Course c set c.enrolledCount = c.enrolledCount - 1 where c.id = :id and c.enrolledCount > 0")
     int decrementEnrolledCount(@Param("id") UUID id);
+
+    /**
+     * Sets the course's count from its enrolments rather than stepping it: the places (ACTIVE and
+     * COMPLETED) held by accounts that still exist. Used when an account is deleted, where a step
+     * down would trust a count that deleting accounts has let drift (V21 recounts the same way).
+     * Flushes first, so the enrolments just cancelled in this transaction are what it counts.
+     */
+    @Modifying(flushAutomatically = true)
+    @Query(value = """
+           update courses set enrolled_count =
+               (select count(*) from enrollments e
+                  join users u on u.id = e.user_id and u.deleted_at is null
+                 where e.course_id = :id and e.deleted_at is null
+                   and e.status in ('ACTIVE', 'COMPLETED'))
+           where id = :id
+           """, nativeQuery = true)
+    int recountEnrolled(@Param("id") UUID id);
 }

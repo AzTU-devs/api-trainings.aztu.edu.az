@@ -11,8 +11,13 @@ public class HttpUrlValidator implements ConstraintValidator<HttpUrl, String> {
 
     @Override
     public boolean isValid(String value, ConstraintValidatorContext context) {
-        if (value == null || value.isBlank()) {
-            return true;
+        return value == null || value.isBlank() || isWebAddress(value);
+    }
+
+    /** The rule itself, for code that has to check a value no request annotation covered. */
+    public static boolean isWebAddress(String value) {
+        if (value == null) {
+            return false;
         }
         URI uri;
         try {

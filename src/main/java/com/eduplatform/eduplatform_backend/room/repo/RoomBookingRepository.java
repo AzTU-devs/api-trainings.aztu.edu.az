@@ -31,6 +31,9 @@ public interface RoomBookingRepository extends JpaRepository<RoomBooking, UUID> 
 
     Page<RoomBooking> findAllByRoomId(UUID roomId, Pageable pageable);
 
+    /** Whether any booking, in any status, is on record for the room. */
+    boolean existsByRoomId(UUID roomId);
+
     /**
      * Pre-check overlap before insert; the DB exclusion constraint is the source of truth
      * but this gives a friendlier error message and avoids burning a transaction.

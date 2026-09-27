@@ -9,17 +9,30 @@ defaults to the **prod** profile.
 > plus the host firewall, TLS and the first-admin bootstrap. This file is the
 > reference for *this* service's configuration; that one is the sequence.
 
-```bash
-docker build -t eduplatform-backend:latest .
-docker run -p 8080:8080 --env-file .env -v /opt/uploads:/opt/uploads eduplatform-backend:latest
-```
-
-In production the stack is started from this directory instead, which wires the
-volume and host networking for you:
+In production the stack is started from this directory, which wires the volume,
+host networking, the profile, the stop timeout and the memory limit for you:
 
 ```bash
 docker compose -f docker-compose.prod.yml up -d --build
 ```
+
+Without compose, the equivalent is:
+
+```bash
+docker build -t eduplatform-backend:latest .
+docker run -d --name eduplatform-backend --network host --env-file .env \
+  -e SPRING_PROFILES_ACTIVE=prod --stop-timeout 30 --memory 2g \
+  -v /opt/uploads:/opt/uploads eduplatform-backend:latest
+```
+
+`-e SPRING_PROFILES_ACTIVE=prod` is not optional. Every value in `--env-file`
+beats the image's `ENV SPRING_PROFILES_ACTIVE=prod`, and `-e` beats `--env-file`.
+A `.env` copied from an older `.env.example` says `dev`, and under `dev` the API
+seeds `superadmin@eduplatform.local` / `Password123!`, turns Swagger on, and skips
+every startup check, including the one that refuses the public placeholder JWT
+secret. Anyone could then sign their own `SUPER_ADMIN` token. `--network host`
+rather than `-p 8080:8080`: a published port bypasses UFW (see
+[TLS / reverse proxy](#tls--reverse-proxy)).
 
 ## Required environment
 
@@ -29,6 +42,7 @@ tokens with a known key.
 
 | Variable | Notes |
 | --- | --- |
+| `SPRING_PROFILES_ACTIVE` | `prod`. The image defaults to it and `docker-compose.prod.yml` pins it; `.env` must not set anything else. Under `dev` alone none of the checks below run (`dev` next to another profile is refused). |
 | `DATABASE_URL` | `jdbc:postgresql://host:5432/db?sslmode=require` |
 | `DATABASE_USERNAME` | |
 | `DATABASE_PASSWORD` | Set it to an empty value deliberately if the database uses IAM or certificate auth — startup then warns instead of failing. |
@@ -40,8 +54,8 @@ you almost certainly want to set:
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `APP_BASE_URL` | `http://localhost:8080` | Used to build OAuth redirect URIs. |
-| `CORS_ALLOWED_ORIGINS` | localhost list | Set to the real frontend + portal origins. Startup warns if it still contains `localhost`. |
-| `FRONTEND_PUBLIC_URL` / `FRONTEND_PORTAL_URL` | localhost | Used in emails and redirects. |
+| `CORS_ALLOWED_ORIGINS` | localhost list | Exactly `https://trainings.aztu.edu.az,https://dashboard-trainings.aztu.edu.az`. Never `*` and never a wildcard pattern such as `https://*.aztu.edu.az`: CORS here allows credentials, so every origin that matches can call `POST /api/auth/refresh` with the portal's refresh cookie and read a fresh admin token. The dashboard origin stays although the portal calls REST same-origin, because the `/ws` handshake is checked against this list too. Outside `dev`, startup refuses a wildcard, `null` or plain-http origin, and warns about `localhost`. |
+| `FRONTEND_PUBLIC_URL` | `http://localhost:3000` | The public site's origin. Password-reset and e-mail-verification links, and the redirect after OAuth sign-in, are built from it. (`FRONTEND_PORTAL_URL` is not read by anything; a leftover line is harmless.) |
 | `STORAGE_LOCAL_DIR` | `/opt/uploads` | Must equal the container side of the mounted volume — see [Uploads](#uploads). |
 | `PAYMENTS_ENABLED` | `false` | Free-only mode. See [Free-only mode](#free-only-mode). |
 | `RATE_LIMIT_ENABLED` | `true` | Per-IP buckets on the unauthenticated auth endpoints. Leave on. |
@@ -89,7 +103,7 @@ Uploads take one of two paths, and on each the smallest ceiling wins:
 | --- | --- | --- |
 | API, per media kind | `UPLOAD_MAX_IMAGE_MB` / `UPLOAD_MAX_VIDEO_MB` / `UPLOAD_MAX_DOCUMENT_MB` | 10 / 512 / 25 MB |
 | API, multipart (`POST /api/media`: images and documents) | `spring.servlet.multipart.max-file-size` / `max-request-size` | 32 MB / 40 MB |
-| Admin portal nginx, and the host's `api-trainings` vhost | `client_max_body_size` | 550m |
+| Host nginx, **both** the `dashboard-trainings` and the `api-trainings` vhost, and the admin portal's own nginx | `client_max_body_size` | 550m |
 
 **Images and documents** go multipart to `POST /api/media`, so they pass the
 per-kind ceiling, the 32 MB / 40 MB multipart limits and nginx. The multipart
@@ -106,12 +120,19 @@ produced.
 while the bytes arrive in `VideoService` from `app.uploads.max-video-mb`. Only
 that ceiling and nginx apply.
 
-Keep nginx above the API limits on both paths. If it is the smaller one, the
+Keep every nginx on the way above the API limits. If one is the smaller, the
 uploader gets a bare `413` from the proxy with no typed error body, so the portal
-cannot tell the user what actually went wrong. When the portal is built with an
-absolute `VITE_API_BASE_URL`, uploads reach the API through the host's
-`api-trainings` vhost rather than the portal's own nginx, which is why both carry
-550m.
+cannot tell the user what actually went wrong. Which nginx instances an upload
+passes depends on who sends it:
+
+- the admin portal, built with `VITE_API_BASE_URL=/api` (production): host
+  `dashboard-trainings` vhost, then the portal container's nginx, then the API;
+- the public site, and the portal if built with an absolute `VITE_API_BASE_URL`:
+  host `api-trainings` vhost, then the API.
+
+Both host vhosts therefore need `550m`, and with nginx's 1 MB default the first
+path failed for every cover over 1 MB, every document and every video. Both are
+in [deploy/nginx/trainings.conf](deploy/nginx/trainings.conf).
 
 ## Free-only mode
 
@@ -150,10 +171,16 @@ Only turn it off for a load test against a non-public deployment.
   the operator reads the admin-bootstrap OTP
   ([deployment.md §8](docs/operations/deployment.md#8-create-the-first-admin)) —
   but the body also carries live password-reset links and OTPs for anyone who
-  asks for one, so treat the container logs as secret while mail is off.
+  asks for one, so treat the container logs as secret while mail is off. It is
+  not a production setting: expert sign-up, e-mail verification and password
+  reset never reach the user. Turn mail on as soon as the first admin exists.
 - **`MAIL_ENABLED=true`**: a failed send is logged with the recipient and subject
   only, never the body. The failure does not fail the request, so a broken SMTP
-  setup shows up in the log, not as an error the user sees.
+  setup shows up in the log, not as an error the user sees. After turning it on,
+  request one real password reset and confirm the mail arrives; that is the only
+  proof. `MAIL_USERNAME`/`MAIL_PASSWORD` are the relay's credentials (the AzTU
+  relay, or a Gmail app password for the `MAIL_FROM` mailbox, not its login
+  password).
 - **SMTP timeouts**: connect 5 s, read 10 s, write 10 s
   (`spring.mail.properties.mail.smtp.connectiontimeout` / `timeout` /
   `writetimeout`). JavaMail's own default is to wait forever, and some sends
@@ -166,8 +193,9 @@ Only turn it off for a load test against a non-public deployment.
 
 ## What the `prod` profile changes
 
-`SPRING_PROFILES_ACTIVE=prod` is baked into the image
-(`application-prod.properties`):
+`SPRING_PROFILES_ACTIVE=prod` is baked into the image and pinned again under
+`environment:` in `docker-compose.prod.yml`, because a value in `.env` would beat
+the image's default (`application-prod.properties`):
 
 - **Flyway runs `classpath:db/migration` only.** The `dev` profile also applies
   `classpath:db/dev`, which creates login-ready `ADMIN` and `SUPER_ADMIN`
@@ -177,7 +205,21 @@ Only turn it off for a load test against a non-public deployment.
 - Error responses drop messages, binding errors, and stack traces.
 - Swagger/OpenAPI off, actuator limited to `health,info`.
 - `logging.level.com.eduplatform` drops from `DEBUG` to `INFO`.
-- Graceful shutdown (25s) so rolling deploys drain in-flight requests.
+- Graceful shutdown: on `docker compose stop` or a redeploy, requests already
+  running get up to 25s to finish; new ones are refused. There is one instance and
+  no rolling deploy, so the API is down from the stop until the new container
+  reports ready. `stop_grace_period: 30s` in
+  `docker-compose.prod.yml` is what lets the 25s happen: Docker's default is to
+  kill the container after 10s.
+
+## Memory
+
+`docker-compose.prod.yml` caps the container at `mem_limit: 2g`, and the JVM takes
+75% of that for the heap (`-XX:MaxRAMPercentage=75` in the Dockerfile), about
+1.5 GiB. Without the cap the 75% is of the whole host, which it shares with
+PostgreSQL and the two frontends. Resident memory is about 730 MiB under light
+load, so do not go below 2g; raise it if the host has room and the heap fills
+(`docker stats eduplatform-backend`).
 
 ## Health
 
@@ -224,12 +266,16 @@ can reach port 8080 directly never does.
 
 ## TLS / reverse proxy
 
-**No TLS configuration ships in this repo.** The app listens on plain HTTP on
+**The app itself does no TLS.** It listens on plain HTTP on
 `SERVER_PORT` (8080), and `docker-compose.prod.yml` uses `network_mode: host`, so
 it binds the host's port directly — there is no published Docker port and no
 certificate anywhere in the image. Certificates, HSTS and the `http → https`
-redirect are the reverse proxy's job (nginx / Caddy on the host, or the
-university's ingress) and live outside this codebase.
+redirect are the host nginx's job. Its config for all three hostnames is
+[deploy/nginx/trainings.conf](deploy/nginx/trainings.conf), installed as
+`/etc/nginx/sites-available/trainings` by
+[deployment.md §6](docs/operations/deployment.md#6-tls-and-the-host-reverse-proxy).
+Nothing copies it there on a redeploy, so diff it against the live file after
+every `git pull`.
 
 Consequences worth being explicit about:
 
@@ -291,24 +337,28 @@ in `.env` is ignored; delete it when convenient.
 3. Create and chown the upload directory:
    `sudo mkdir -p /opt/uploads && sudo chown -R 1001:1001 /opt/uploads`.
    `STORAGE_PROVIDER` stays `LOCAL` — there is no S3 implementation to switch to.
-4. Set `CORS_ALLOWED_ORIGINS` to the real frontend origins and `APP_BASE_URL` to
-   the public `https://` origin.
-5. Fill in SMTP (`MAIL_*`) and set `MAIL_ENABLED=true`. Until you do, OTP,
-   e-mail verification and password reset are only logged — which means tutor
-   sign-up and password reset cannot complete for a real user. (Admin bootstrap
-   can, by reading the OTP from the log — see [Mail](#mail).)
-6. Set `ADMIN_SELF_REGISTER=true`, register the first admin straight away, then
+4. Set `CORS_ALLOWED_ORIGINS` to exactly the two frontend origins (see the table
+   above: never `*`) and `APP_BASE_URL` to the public `https://` origin.
+5. Set `ADMIN_SELF_REGISTER=true`, register the first admin straight away, then
    set it back to `false` and redeploy. Registration needs the flag **and** zero
    existing `ADMIN`/`SUPER_ADMIN` accounts, so once yours exists the flag alone
    cannot reopen it; until then, whoever reaches the portal first gets the
    account, so keep the window short. The bootstrap account is an `ADMIN` —
    promote it to `SUPER_ADMIN` once in SQL
    ([deployment.md §8](docs/operations/deployment.md#8-create-the-first-admin)).
+   With mail still off, the OTP is read from the log ([Mail](#mail)), so do this
+   step before the next one.
+6. Fill in SMTP (`MAIL_*`), set `MAIL_ENABLED=true`, recreate the container
+   (`up -d`), and run one real password reset end to end. Until then OTP, e-mail
+   verification and password reset are only logged, so expert sign-up and
+   password reset cannot complete for a real user.
 7. Confirm TLS terminates in front of the app and that port 8080 is not reachable
    from outside the host — see [TLS / reverse proxy](#tls--reverse-proxy) for why
    that is a security control and not tidiness.
 8. Leave `PAYMENTS_ENABLED=false` until a payment provider is actually
    integrated.
+9. Install the backups and take the first one
+   ([DB_SETUP.md §9](DB_SETUP.md#9-backups)).
 
 ## Local development
 

@@ -33,6 +33,14 @@ public interface TutorRegistrationOtpRepository extends JpaRepository<TutorRegis
     @Query("update TutorRegistrationOtp o set o.attempts = o.attempts + 1 where o.id = :id")
     int recordFailedAttemptAndCommit(@Param("id") UUID id);
 
+    /** Sign-up codes issued to the address since {@code since}, used or not. */
+    @Query("select count(o) from TutorRegistrationOtp o where lower(o.email) = lower(:email) and o.createdAt > :since")
+    long countIssuedSince(@Param("email") String email, @Param("since") Instant since);
+
+    /** When the latest code for the address was issued, used or not. */
+    @Query("select max(o.createdAt) from TutorRegistrationOtp o where lower(o.email) = lower(:email)")
+    Optional<Instant> lastIssuedAt(@Param("email") String email);
+
     @Modifying
     @Query("delete from TutorRegistrationOtp o where o.expiresAt < :before")
     int deleteExpired(@Param("before") Instant before);

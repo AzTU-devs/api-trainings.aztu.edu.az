@@ -19,9 +19,16 @@ public final class HttpMeta {
      * API vhost's {@code $proxy_add_x_forwarded_for} appends to whatever the client sent, so the
      * leftmost entry was the client's own choice. The auth rate limiter, the IP blocklist and audit
      * attribution all key on this value.
+     *
+     * <p>Null unless it is an IP literal. The valve takes a forwarded entry as whatever text it
+     * holds; ClientAddressConfig puts the TCP peer back when that text is no address, and this
+     * check keeps anything that got past it out of the INET columns the value is stored in, where
+     * a malformed one failed the whole request.
      */
     public static String clientIp(HttpServletRequest request) {
-        return request == null ? null : request.getRemoteAddr();
+        if (request == null) return null;
+        String address = request.getRemoteAddr();
+        return BlockedIpService.canonical(address).isPresent() ? address : null;
     }
 
     public static String userAgent(HttpServletRequest request) {

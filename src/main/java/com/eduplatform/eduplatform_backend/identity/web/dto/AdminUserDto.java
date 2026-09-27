@@ -17,5 +17,7 @@ public record AdminUserDto(
         Set<String> roles,
         String status,
         Instant createdAt,
-        Instant lastLoginAt
+        Instant lastLoginAt,
+        /** When a temporary failed-login lockout ends; null when the account is not locked out. */
+        Instant lockedUntil
 ) {}

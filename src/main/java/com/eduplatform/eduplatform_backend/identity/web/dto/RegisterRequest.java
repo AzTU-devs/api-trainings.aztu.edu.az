@@ -16,5 +16,6 @@ public record RegisterRequest(
         @NotBlank @Size(max = 80) String firstName,
         @NotBlank @Size(max = 80) String lastName,
         @Size(max = 32) String phone,
-        @Size(max = 8) String locale
+        @Pattern(regexp = ValidationPatterns.LOCALE_OR_BLANK, message = ValidationPatterns.LOCALE_MESSAGE)
+        String locale
 ) {}

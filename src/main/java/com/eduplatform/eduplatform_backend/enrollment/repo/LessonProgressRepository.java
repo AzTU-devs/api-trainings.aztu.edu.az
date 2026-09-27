@@ -15,9 +15,18 @@ public interface LessonProgressRepository extends JpaRepository<LessonProgress, 
 
     List<LessonProgress> findAllByEnrollmentId(UUID enrollmentId);
 
+    /**
+     * Completed lessons of the enrolment that still exist in this course. The joins go through
+     * the lesson and its module, whose soft-delete restrictions leave deleted ones out, so the
+     * count matches LessonRepository.countByCourseId, the total it is divided by.
+     */
     @Query("""
            select count(lp) from LessonProgress lp
-           where lp.enrollment.id = :enrollmentId and lp.status = 'COMPLETED'
+             join lp.lesson l
+             join l.module m
+           where lp.enrollment.id = :enrollmentId
+             and m.course.id = :courseId
+             and lp.status = com.eduplatform.eduplatform_backend.common.enums.LessonProgressStatus.COMPLETED
            """)
-    long countCompletedByEnrollment(@Param("enrollmentId") UUID enrollmentId);
+    long countCompletedLiveLessons(@Param("enrollmentId") UUID enrollmentId, @Param("courseId") UUID courseId);
 }

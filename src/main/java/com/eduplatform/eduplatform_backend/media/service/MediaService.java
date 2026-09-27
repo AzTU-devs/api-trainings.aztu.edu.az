@@ -6,6 +6,7 @@ import com.eduplatform.eduplatform_backend.common.error.Errors;
 import com.eduplatform.eduplatform_backend.common.security.AuthenticatedPrincipal;
 import com.eduplatform.eduplatform_backend.course.repo.CourseRepository;
 import com.eduplatform.eduplatform_backend.course.repo.LessonRepository;
+import com.eduplatform.eduplatform_backend.enrollment.repo.EnrollmentRepository;
 import com.eduplatform.eduplatform_backend.media.domain.MediaFile;
 import com.eduplatform.eduplatform_backend.media.repo.MediaFileRepository;
 import com.eduplatform.eduplatform_backend.media.storage.StorageService;
@@ -13,6 +14,7 @@ import com.eduplatform.eduplatform_backend.media.upload.AllowedMediaType;
 import com.eduplatform.eduplatform_backend.media.upload.UploadPolicy;
 import com.eduplatform.eduplatform_backend.media.web.dto.MediaFileDto;
 import com.eduplatform.eduplatform_backend.media.web.mapper.MediaMapper;
+import com.eduplatform.eduplatform_backend.room.repo.RoomImageRepository;
 import com.eduplatform.eduplatform_backend.tutor.repo.TutorProfileRepository;
 import org.springframework.core.io.Resource;
 import org.springframework.http.MediaType;
@@ -42,10 +44,13 @@ public class MediaService {
     private final LessonRepository lessons;
     private final CourseRepository courses;
     private final TutorProfileRepository tutors;
+    private final RoomImageRepository roomImages;
+    private final EnrollmentRepository enrollments;
     private final UploadPolicy policy;
 
     public MediaService(MediaFileRepository media, StorageService storage, MediaMapper mapper,
                         LessonRepository lessons, CourseRepository courses, TutorProfileRepository tutors,
+                        RoomImageRepository roomImages, EnrollmentRepository enrollments,
                         UploadPolicy policy) {
         this.media = media;
         this.storage = storage;
@@ -53,6 +58,8 @@ public class MediaService {
         this.lessons = lessons;
         this.courses = courses;
         this.tutors = tutors;
+        this.roomImages = roomImages;
+        this.enrollments = enrollments;
         this.policy = policy;
     }
 
@@ -128,8 +135,10 @@ public class MediaService {
 
     /**
      * Access policy for streaming media bytes: public assets, the owner, staff, published-course
-     * marketing assets (thumbnail/trailer), an approved expert's portrait or the viewer's own,
-     * and enrolled students viewing a lesson video.
+     * marketing assets (thumbnail/trailer), the files of lessons in a course the viewer holds a
+     * place on or teaches, an approved expert's portrait or the viewer's own, room photos for
+     * those who may browse rooms, the cover and trailer of a course the viewer teaches, and the
+     * photos of the participants a tutor teaches.
      */
     private boolean canAccess(MediaFile m, AuthenticatedPrincipal caller) {
         if (m.getVisibility() == MediaVisibility.PUBLIC) return true;
@@ -138,10 +147,20 @@ public class MediaService {
         if (caller.roles().contains("ADMIN") || caller.roles().contains("SUPER_ADMIN")) return true;
         if (courses.isPublishedCourseAsset(m.getId())) return true;
         if (lessons.isLessonMediaViewableBy(m.getId(), caller.userId())) return true;
-        // Asked last, so that streaming a lesson video — many range requests each — never pays for
-        // it. The dashboard previews a portrait through this endpoint, so an expert must see their
+        // Asked after the lesson check, so that streaming a lesson video — many range requests
+        // each — never pays for them. Every upload is PRIVATE and owned by whoever uploaded it,
+        // so each of the readers below was refused although the file is plainly theirs to see.
+        //
+        // The dashboard previews a portrait through this endpoint, so an expert must see their
         // own even when an admin uploaded it and the profile is not approved yet.
-        return tutors.isTutorAvatarVisibleTo(m.getId(), caller.userId());
+        if (tutors.isTutorAvatarVisibleTo(m.getId(), caller.userId())) return true;
+        // A tutor choosing a room to book: the photos are the point of the room catalogue, and an
+        // admin uploaded them. Deleted rooms are left out by the room's soft-delete restriction.
+        if (caller.permissions().contains("room:read") && roomImages.isImageOfLiveRoom(m.getId())) return true;
+        // The cover or trailer an admin set on a course the caller teaches, while it is a draft.
+        if (courses.isCourseAssetOfTutor(m.getId(), caller.userId())) return true;
+        // A tutor's student list shows each participant's photo.
+        return enrollments.isAvatarOfStudentTaughtBy(m.getId(), caller.userId());
     }
 
     /**

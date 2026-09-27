@@ -6,6 +6,7 @@ import com.eduplatform.eduplatform_backend.enrollment.domain.Enrollment;
 import com.eduplatform.eduplatform_backend.identity.domain.User;
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.Formula;
 import org.hibernate.annotations.SQLDelete;
 import org.hibernate.annotations.SQLRestriction;
 
@@ -28,6 +29,15 @@ public class CourseReview extends SoftDeletable {
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "user_id", nullable = false)
     private User user;
+
+    /**
+     * The author's name as the review lists show it, read straight from the users row, and null
+     * once the account is deleted. Going through {@link #user} meant loading the account, which
+     * throws for a deleted one: hiding such a review from moderation failed with 404. Never
+     * written.
+     */
+    @Formula("(select concat(u.first_name, ' ', u.last_name) from users u where u.id = user_id and u.deleted_at is null)")
+    private String authorName;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "enrollment_id")

@@ -20,11 +20,13 @@ public class CorsConfig {
     @Primary
     CorsConfigurationSource corsConfigurationSource(CorsProperties props) {
         CorsConfiguration cfg = new CorsConfiguration();
-        // Patterns, not origins: allowCredentials(true) below makes Spring reject the
-        // literal "*" in setAllowedOrigins — and it throws per-request, not at startup,
-        // so the app boots healthy and then 500s on the first browser call.
-        // setAllowedOriginPatterns accepts "*", wildcards like https://*.example.com,
-        // and plain exact origins, so narrowing CORS later is an env-var change only.
+        // Credentials are allowed (below), so every origin listed here can call the API as the
+        // signed-in user — list exact origins only, the site and the dashboard. Patterns are
+        // used only because setAllowedOrigins throws per request, not at startup, on the
+        // combination of credentials and "*"; with patterns that same "*" is accepted and
+        // reflects EVERY origin back with credentials, which is worse. StartupSecurityValidator
+        // therefore refuses to start outside dev on a wildcard, "null" or plain-http origin.
+        // The refresh-token cookie is guarded separately: see AuthController.cookieToken.
         cfg.setAllowedOriginPatterns(props.allowedOrigins() == null ? List.of() : props.allowedOrigins());
         cfg.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         cfg.setAllowedHeaders(List.of("*"));

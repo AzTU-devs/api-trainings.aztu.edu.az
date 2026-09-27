@@ -26,14 +26,14 @@ import java.util.stream.Collectors;
 public interface CourseMapper {
 
     @Mapping(target = "tutorId", source = "tutor.id")
-    @Mapping(target = "tutorDisplayName", expression = "java(course.getTutor() == null ? null : course.getTutor().getUser().getFirstName() + \" \" + course.getTutor().getUser().getLastName())")
+    @Mapping(target = "tutorDisplayName", expression = "java(course.getTutor() == null ? null : course.getTutor().getDisplayName())")
     @Mapping(target = "tutors", expression = "java(toTutorDtos(course))")
     @Mapping(target = "totalDurationSec", expression = "java(totalDurationSec(course))")
     @Mapping(target = "thumbnailUrl", expression = "java(thumbnailUrl(course))")
     CourseSummaryDto toSummaryDto(Course course);
 
     @Mapping(target = "tutorId", source = "tutor.id")
-    @Mapping(target = "tutorDisplayName", expression = "java(course.getTutor() == null ? null : course.getTutor().getUser().getFirstName() + \" \" + course.getTutor().getUser().getLastName())")
+    @Mapping(target = "tutorDisplayName", expression = "java(course.getTutor() == null ? null : course.getTutor().getDisplayName())")
     @Mapping(target = "thumbnailMediaId", source = "thumbnail.id")
     @Mapping(target = "trailerMediaId",   source = "trailer.id")
     @Mapping(target = "categoryIds", source = "categories", qualifiedByName = "categoryIds")
@@ -100,9 +100,12 @@ public interface CourseMapper {
                 .toList();
     }
 
+    /**
+     * Read from the profile's own formula column rather than through its account, which may be
+     * gone (see TutorProfile.displayName); the text is the same "first last" either way.
+     */
     private static String displayNameOf(TutorProfile t) {
-        if (t == null || t.getUser() == null) return null;
-        return t.getUser().getFirstName() + " " + t.getUser().getLastName();
+        return t == null ? null : t.getDisplayName();
     }
 
     /**

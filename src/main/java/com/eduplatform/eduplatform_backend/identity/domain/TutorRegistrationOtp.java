@@ -57,6 +57,10 @@ public class TutorRegistrationOtp {
     @Column(name = "linkedin_url", length = 255)
     private String linkedinUrl;
 
+    /** The language the applicant signed up in; the account is created with it. */
+    @Column(name = "locale", length = 8)
+    private String locale;
+
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "category_ids", nullable = false, columnDefinition = "jsonb")
     private List<String> categoryIds;

@@ -106,6 +106,10 @@ public class Course extends SoftDeletable {
     @Column(name = "published_at")
     private Instant publishedAt;
 
+    /** When the course was last submitted for review; the moderation queue shows it. */
+    @Column(name = "submitted_at")
+    private Instant submittedAt;
+
     @Column(name = "rating_avg", nullable = false, precision = 3, scale = 2)
     @Builder.Default
     private BigDecimal ratingAvg = BigDecimal.ZERO;

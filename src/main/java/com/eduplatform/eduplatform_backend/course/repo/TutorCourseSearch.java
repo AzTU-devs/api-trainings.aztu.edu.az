@@ -2,7 +2,11 @@ package com.eduplatform.eduplatform_backend.course.repo;
 
 import com.eduplatform.eduplatform_backend.common.enums.CourseStatus;
 import com.eduplatform.eduplatform_backend.course.domain.Course;
+import com.eduplatform.eduplatform_backend.tutor.domain.TutorProfile;
+import jakarta.persistence.criteria.Join;
 import jakarta.persistence.criteria.Predicate;
+import jakarta.persistence.criteria.Root;
+import jakarta.persistence.criteria.Subquery;
 import org.hibernate.query.criteria.HibernateCriteriaBuilder;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
@@ -12,7 +16,7 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * The query behind {@link CourseRepository#searchTutorUserCourses}: a tutor's own courses,
+ * The query behind {@link CourseRepository#searchTutorUserCourses}: the courses a tutor teaches,
  * drafts included, narrowed by an optional status and an optional substring.
  *
  * <p>Substring matching rather than the catalog's full-text index: this searches one tutor's
@@ -42,7 +46,16 @@ public final class TutorCourseSearch {
     public static Specification<Course> of(UUID userId, CourseStatus status, String q) {
         return (root, query, cb) -> {
             List<Predicate> where = new ArrayList<>(3);
-            where.add(cb.equal(root.get("tutor").get("user").get("id"), userId));
+            // Every course the user teaches: the one they are authorised to edit, or any whose
+            // roster names them. Co-tutors used to find nothing here. EXISTS rather than a join,
+            // so that a course is listed once and paging stays exact.
+            Subquery<Integer> onRoster = query.subquery(Integer.class);
+            Root<Course> correlated = onRoster.correlate(root);
+            Join<Course, TutorProfile> tutor = correlated.join("tutors");
+            onRoster.select(cb.literal(1)).where(cb.equal(tutor.get("user").get("id"), userId));
+            where.add(cb.or(
+                    cb.equal(root.get("tutor").get("user").get("id"), userId),
+                    cb.exists(onRoster)));
             if (status != null) {
                 where.add(cb.equal(root.get("status"), status));
             }

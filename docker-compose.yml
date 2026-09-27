@@ -50,9 +50,10 @@ services:
       SERVER_PORT:  8080
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8080}
 
-      # Frontends / CORS
+      # Frontends / CORS. FRONTEND_PUBLIC_URL is the base of the reset and
+      # verification links in e-mails. There is no portal URL setting: the API
+      # never builds a link to the admin portal.
       FRONTEND_PUBLIC_URL:  ${FRONTEND_PUBLIC_URL:-http://localhost:3000}
-      FRONTEND_PORTAL_URL:  ${FRONTEND_PORTAL_URL:-http://localhost:3001}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:5174}
 
       # JWT

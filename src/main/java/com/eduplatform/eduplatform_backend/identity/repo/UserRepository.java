@@ -37,16 +37,40 @@ public interface UserRepository extends JpaRepository<User, UUID> {
                   or lower(u.lastName) like lower(concat('%', cast(:search as string), '%')))
              and (:status is null or u.status = :status)
              and (:role is null or r.code = :role)
+             and (:lockedOnly = false
+                  or u.status = com.eduplatform.eduplatform_backend.common.enums.UserStatus.LOCKED
+                  or u.lockedUntil > :now)
            """)
     Page<User> searchForAdmin(@Param("search") String search,
                               @Param("status") UserStatus status,
                               @Param("role") RoleCode role,
+                              @Param("lockedOnly") boolean lockedOnly,
+                              @Param("now") Instant now,
                               Pageable pageable);
+
+    /** Active accounts holding {@code role}, other than {@code excludeId}; see UserAdminService. */
+    @Query("""
+           select count(distinct u.id) from User u
+             join u.userRoles ur
+             join ur.role r
+           where r.code = :role
+             and u.status = com.eduplatform.eduplatform_backend.common.enums.UserStatus.ACTIVE
+             and u.id <> :excludeId
+           """)
+    long countActiveWithRoleExcluding(@Param("role") RoleCode role, @Param("excludeId") UUID excludeId);
 
     @Query("select u from User u where u.status = :status")
     java.util.List<User> findAllByStatus(@Param("status") UserStatus status);
 
     long countByStatus(UserStatus status);
+
+    /** Accounts in a failed-login lockout now, or still holding a pre-V14 LOCKED status. */
+    @Query("""
+           select count(u) from User u
+           where u.lockedUntil > :now
+              or u.status = com.eduplatform.eduplatform_backend.common.enums.UserStatus.LOCKED
+           """)
+    long countLockedOut(@Param("now") Instant now);
 
     /** Count of distinct users holding any of the given roles — used to gate admin self-registration. */
     @Query("""
@@ -66,9 +90,25 @@ public interface UserRepository extends JpaRepository<User, UUID> {
            """)
     java.util.List<User> findAllByRoleAndStatus(@Param("role") RoleCode role, @Param("status") UserStatus status);
 
+    /** A successful sign-in also ends any temporary lockout the failed attempts before it set. */
     @Modifying
-    @Query("update User u set u.lastLoginAt = :ts, u.failedLogins = 0 where u.id = :id")
+    @Query("update User u set u.lastLoginAt = :ts, u.failedLogins = 0, u.lockedUntil = null where u.id = :id")
     int markLoginSuccess(@Param("id") UUID id, @Param("ts") Instant ts);
+
+    /** Lifts a pre-V14 permanent lock; see AuthService.login. */
+    @Modifying
+    @Query("update User u set u.status = com.eduplatform.eduplatform_backend.common.enums.UserStatus.ACTIVE "
+            + "where u.id = :id and u.status = com.eduplatform.eduplatform_backend.common.enums.UserStatus.LOCKED")
+    int releaseLegacyLock(@Param("id") UUID id);
+
+    /** What UserSessionState compares an access token against; empty for a deleted account. */
+    @Query("select u.status as status, u.tokenVersion as tokenVersion from User u where u.id = :id")
+    Optional<SessionStateView> findSessionState(@Param("id") UUID id);
+
+    interface SessionStateView {
+        UserStatus getStatus();
+        long getTokenVersion();
+    }
 
     @Modifying
     @Query("update User u set u.failedLogins = u.failedLogins + 1 where u.id = :id")

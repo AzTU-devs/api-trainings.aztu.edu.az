@@ -17,11 +17,13 @@ import java.util.UUID;
  * the same order, as the course media check (CourseMediaValidator): 404 MEDIA_NOT_FOUND, then
  * 403 MEDIA_FORBIDDEN, then 422 INVALID_MEDIA_FOR_FIELD.
  *
- * <p>Ownership is where it differs. Course fields exempt admins outright; an avatar does not,
- * because it is served anonymously as soon as the expert is approved, and an admin free to name
- * any id could publish a private upload of anyone at all. So the file must have been uploaded by
- * the expert whose profile it is or by whoever is editing it — on the expert's own edit those are
- * the same person, and on an admin's edit that admin.
+ * <p>The file must have been uploaded by whoever is setting it. An avatar is served anonymously
+ * as soon as the expert is approved, so naming someone else's upload would publish it — and that
+ * includes the expert's own uploads when an admin is the one editing: an expert's files are
+ * mostly lesson material and documents they chose to keep private, and an admin picking one by
+ * id could put, say, a scanned diploma on the public page. On the expert's own edit the caller is
+ * the expert; on an admin's edit the admin uploads the portrait themselves, which is what the
+ * dashboard's Edit dialog does anyway.
  *
  * <p>The kind comes from the stored MIME type through the upload allowlist, the table the upload
  * endpoint validated against, so the image types accepted here can never drift from the ones an
@@ -44,12 +46,9 @@ public class TutorAvatarValidator {
                 .orElseThrow(() -> Errors.notFound("MEDIA_NOT_FOUND", "Media " + mediaId + " does not exist"));
 
         UUID owner = m.getOwnerUserId();
-        // The profile's user is a lazy proxy; reading its id does not load it.
-        boolean mayUse = owner != null
-                && (owner.equals(profile.getUser().getId()) || owner.equals(caller.userId()));
-        if (!mayUse) {
+        if (owner == null || !owner.equals(caller.userId())) {
             throw Errors.forbidden("MEDIA_FORBIDDEN",
-                    PROPERTY + " must refer to an image uploaded by the expert or by you");
+                    PROPERTY + " must refer to an image you uploaded yourself");
         }
 
         if (m.getStatus() != MediaStatus.READY) {

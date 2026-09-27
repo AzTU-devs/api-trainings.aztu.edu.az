@@ -75,6 +75,17 @@ public class TutorController {
         return ApiResponse.ok(mapper.toDto(service.updateOwnProfile(me, req)));
     }
 
+    @PostMapping("/me/resubmit")
+    @PreAuthorize("isAuthenticated()")
+    @Operation(summary = "Edit a rejected expert application and send it for approval again",
+            description = "Same body and rules as PATCH /me. Only a REJECTED profile can be resubmitted "
+                    + "(otherwise 409 TUTOR_NOT_REJECTED); it goes back to PENDING and into the approval "
+                    + "queue. Open to any signed-in account, because a rejected applicant holds only USER.")
+    public ApiResponse<TutorProfileDto> resubmit(@Valid @RequestBody UpdateTutorProfileRequest req,
+                                                 @CurrentUser AuthenticatedPrincipal me) {
+        return ApiResponse.ok(mapper.toDto(service.resubmit(me, req)));
+    }
+
     @GetMapping("/students")
     @PreAuthorize("hasAuthority('course:create')")
     @Operation(summary = "List students enrolled in my courses (aggregated per student)")

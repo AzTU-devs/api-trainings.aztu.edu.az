@@ -2,6 +2,7 @@ package com.eduplatform.eduplatform_backend.notification.ws;
 
 import com.eduplatform.eduplatform_backend.common.security.AuthenticatedPrincipal;
 import com.eduplatform.eduplatform_backend.common.security.JwtService;
+import com.eduplatform.eduplatform_backend.identity.service.UserSessionState;
 import io.jsonwebtoken.Claims;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageChannel;
@@ -28,9 +29,11 @@ import java.util.UUID;
 public class WebSocketAuthChannelInterceptor implements ChannelInterceptor {
 
     private final JwtService jwt;
+    private final UserSessionState sessions;
 
-    public WebSocketAuthChannelInterceptor(JwtService jwt) {
+    public WebSocketAuthChannelInterceptor(JwtService jwt, UserSessionState sessions) {
         this.jwt = jwt;
+        this.sessions = sessions;
     }
 
     @Override
@@ -47,6 +50,11 @@ public class WebSocketAuthChannelInterceptor implements ChannelInterceptor {
         Claims claims = jwt.parse(header.substring("Bearer ".length()).trim());
 
         UUID userId = UUID.fromString(claims.getSubject());
+        // The same check as JwtAuthFilter: a disabled or deleted account, or one whose roles
+        // changed, must not open a live channel on a token issued before the change.
+        if (!sessions.accepts(userId, JwtService.tokenVersion(claims))) {
+            throw new IllegalArgumentException("STOMP CONNECT with a stale access token");
+        }
         String email = claims.get("email", String.class);
         List<String> roles = JwtService.stringList(claims, "roles");
         List<String> perms = JwtService.stringList(claims, "perms");

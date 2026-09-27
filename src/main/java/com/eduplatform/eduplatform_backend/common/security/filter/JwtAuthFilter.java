@@ -1,9 +1,11 @@
 package com.eduplatform.eduplatform_backend.common.security.filter;
 
 import com.eduplatform.eduplatform_backend.common.error.AppException;
+import com.eduplatform.eduplatform_backend.common.error.Errors;
 import com.eduplatform.eduplatform_backend.common.security.AuthenticatedPrincipal;
 import com.eduplatform.eduplatform_backend.common.security.JwtService;
 import com.eduplatform.eduplatform_backend.common.web.ApiError;
+import com.eduplatform.eduplatform_backend.identity.service.UserSessionState;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.jsonwebtoken.Claims;
 import jakarta.servlet.FilterChain;
@@ -41,10 +43,12 @@ public class JwtAuthFilter extends OncePerRequestFilter {
 
     private final JwtService jwtService;
     private final ObjectMapper mapper;
+    private final UserSessionState sessions;
 
-    public JwtAuthFilter(JwtService jwtService, ObjectMapper mapper) {
+    public JwtAuthFilter(JwtService jwtService, ObjectMapper mapper, UserSessionState sessions) {
         this.jwtService = jwtService;
         this.mapper = mapper;
+        this.sessions = sessions;
     }
 
     @Override
@@ -89,6 +93,13 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         Claims claims = jwtService.parse(token);
 
         UUID userId = UUID.fromString(claims.getSubject());
+        // A valid signature proves only what the account looked like when the token was minted.
+        // Refused here, the dashboard's refresh-and-retry either picks up the account's current
+        // roles and permissions or, for a disabled or deleted account, ends the session.
+        if (!sessions.accepts(userId, JwtService.tokenVersion(claims))) {
+            throw Errors.unauthorized("TOKEN_STALE",
+                    "The account changed since this token was issued; refresh the session");
+        }
         String email = claims.get("email", String.class);
         List<String> roles = JwtService.stringList(claims, "roles");
         List<String> perms = JwtService.stringList(claims, "perms");

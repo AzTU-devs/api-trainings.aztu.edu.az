@@ -72,7 +72,9 @@ public class CourseCatalogRepositoryImpl implements CourseCatalogRepository {
                 UUID.class);
         where.params().forEach(idQuery::setParameter);
         if (pageable.isPaged()) {
-            idQuery.setFirstResult((int) pageable.getOffset());
+            // toIntExact, not a cast: a cast wraps a huge offset into a small or negative one and
+            // quietly serves the wrong rows. The page-number cap in WebMvcConfig keeps this in range.
+            idQuery.setFirstResult(Math.toIntExact(pageable.getOffset()));
             idQuery.setMaxResults(pageable.getPageSize());
         }
         List<?> rows = idQuery.getResultList();
@@ -192,15 +194,19 @@ public class CourseCatalogRepositoryImpl implements CourseCatalogRepository {
      * association the summary mapper reads. Fetch joins and SQL pagination cannot be
      * combined, so the page is narrowed to ids above and hydrated here — two queries
      * per catalogue page instead of two per row.
+     *
+     * <p>The experts' accounts are not joined: the mapper reads their names from
+     * TutorProfile.displayName, which comes with the profile. Fetching the account failed the
+     * whole page once one expert's account had been deleted before deleting retired the
+     * profile (V21) — Hibernate refuses a required association whose row the soft-delete
+     * restriction hides — so one such course took the public catalogue down.
      */
     private List<Course> loadSummaries(List<UUID> ids) {
         if (ids.isEmpty()) return List.of();
         Map<UUID, Course> byId = em.createQuery("""
                         select c from Course c
                           left join fetch c.tutor authorized
-                          left join fetch authorized.user
                           left join fetch c.tutors roster
-                          left join fetch roster.user
                           left join fetch c.onlineDetails
                           left join fetch c.offlineDetails
                         where c.id in :ids

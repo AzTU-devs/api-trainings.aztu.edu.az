@@ -6,7 +6,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -23,6 +25,7 @@ import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 
@@ -59,6 +62,13 @@ import static org.assertj.core.api.Assertions.assertThat;
         "app.security.jwt.access-secret=integration-test-signing-key-not-used-anywhere-else-0123456789",
         "app.oauth.google.client-id=",
         "app.oauth.facebook.app-id=",
+        // The browser-facing origins: the public site and the dashboard, as in production, but
+        // on local addresses. A deployment .env lists the real hosts, which no test request comes
+        // from. 127.0.0.1 stands for a site on another host than the API's (which the tests reach
+        // as localhost), as the public site is in production.
+        "app.cors.allowed-origins=http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000",
+        "app.frontend.public-url=http://localhost:3000",
+        "app.frontend.portal-url=http://localhost:3001",
         // True on purpose. With the dev seeds there is always an admin, so admin self-registration
         // must stay closed even with the flag on: the flag alone used to be enough to open it.
         "app.security.admin-self-register-enabled=true",
@@ -193,6 +203,25 @@ public abstract class AbstractIntegrationTest {
         return hash;
     }
 
+    /**
+     * Deletes an account the way DELETE /api/admin/users did before it retired what the account
+     * held: the users row is soft-deleted and nothing else changes. Production can hold rows in
+     * this state, so the reads have to cope with it and V21 repairs it.
+     */
+    protected void deleteAccountTheOldWay(UUID userId) {
+        jdbc.update("update users set deleted_at = now() where id = ?", userId);
+    }
+
+    /**
+     * Runs a migration's script again. The data-repair migrations touch only rows that are wrong,
+     * so running one again on the test database changes nothing but the rows a test has just put
+     * into the state the migration exists to repair — and running it twice shows it can be.
+     */
+    protected void rerunMigration(String file) {
+        new ResourceDatabasePopulator(new ClassPathResource("db/migration/" + file))
+                .execute(Objects.requireNonNull(jdbc.getDataSource()));
+    }
+
     // ── auth ────────────────────────────────────────────────────────────
 
     protected ApiClient.Response loginResponse(String email, String password) {
@@ -239,8 +268,33 @@ public abstract class AbstractIntegrationTest {
                 course.path("slug").asText(), course.path("title").asText());
     }
 
+    /**
+     * Submits the course, first giving it a lesson if it has none: an ONLINE course with no
+     * lessons can be neither submitted nor published (COURSE_HAS_NO_CONTENT).
+     */
     protected void submitForReview(String tutorToken, UUID courseId) {
+        ensureHasALesson(tutorToken, courseId);
         api.post("/api/portal/courses/" + courseId + "/submit").bearer(tutorToken).send().expectStatus(200);
+    }
+
+    /**
+     * Adds a module holding one TEXT lesson, through the API as {@code editorToken} (the course's
+     * authorised tutor or an admin), unless the course already has a live lesson.
+     */
+    protected void ensureHasALesson(String editorToken, UUID courseId) {
+        Integer lessons = jdbc.queryForObject("""
+                select count(*) from lessons l join course_modules m on m.id = l.module_id
+                where m.course_id = ? and l.deleted_at is null and m.deleted_at is null
+                """, Integer.class, courseId);
+        if (lessons != null && lessons > 0) return;
+        UUID module = UUID.fromString(api.post("/api/portal/courses/" + courseId + "/modules").bearer(editorToken)
+                .json(Json.object("title", "Module " + word(), "description", "Integration test module", "orderIndex", 0))
+                .send().expectStatus(201).data().path("id").asText());
+        api.post("/api/portal/modules/" + module + "/lessons").bearer(editorToken)
+                .json(Json.object("title", "Lesson " + word(), "description", "Integration test lesson",
+                        "contentType", "TEXT", "videoMediaId", null, "videoUrl", null,
+                        "durationSeconds", 60, "orderIndex", 0, "preview", false))
+                .send().expectStatus(201);
     }
 
     /** DRAFT to PUBLISHED the way it happens in production: the tutor submits, an admin approves. */

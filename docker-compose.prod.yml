@@ -1,14 +1,20 @@
 # Production stack for the backend ONLY.
 #
 # Unlike docker-compose.yml (the local dev stack) this does NOT start a Postgres
-# container — it connects to PostgreSQL already installed on the host, and it does
-# not force a profile, so the image's own default (prod) applies.
+# container — it connects to PostgreSQL already installed on the host.
 #
 #   docker compose -f docker-compose.prod.yml up -d --build
 #
 # All configuration comes from .env in this directory. That file must exist and
 # must contain DATABASE_URL / DATABASE_USERNAME / DATABASE_PASSWORD /
 # JWT_ACCESS_SECRET, or the app refuses to start.
+#
+# The profile is the one exception: it is pinned to prod below, under
+# `environment:`, and .env cannot change it. See the note there.
+#
+# .env is read when the container is CREATED, not when it starts. After editing
+# it, run `up -d` (compose recreates the container because its config changed);
+# `docker compose restart` keeps the old values.
 
 services:
   backend:
@@ -34,6 +40,33 @@ services:
 
     env_file:
       - .env
+
+    # Pinned here because env_file beats the image: a SPRING_PROFILES_ACTIVE line in
+    # .env overrides the Dockerfile's ENV SPRING_PROFILES_ACTIVE=prod. A .env copied
+    # from .env.example used to carry `dev`, and under dev the app applies the
+    # db/dev seed migrations (SUPER_ADMIN and ADMIN with the public password
+    # Password123!), turns Swagger on, and StartupSecurityValidator skips every
+    # check, including the one that rejects the placeholder JWT secret. Anyone could
+    # then sign their own SUPER_ADMIN token. `environment:` beats env_file, so under
+    # this file the profile is prod whatever .env says, and a placeholder secret
+    # stops startup.
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+
+    # Longer than the app's own drain. application-prod.properties gives in-flight
+    # requests 25s (server.shutdown=graceful, timeout-per-shutdown-phase=25s), but
+    # Docker's default stop timeout is 10s, after which it sends SIGKILL. Without
+    # this line an `up -d --build` would cut uploads and refresh-token rotations off
+    # at 10s. The extra 5s covers the JVM's own exit after the drain.
+    stop_grace_period: 30s
+
+    # The Dockerfile sizes the heap with -XX:MaxRAMPercentage=75, which is a share of
+    # whatever memory the container can see. With no limit that is the whole host,
+    # shared with Postgres and the two frontends, so the JVM could grow until the
+    # kernel's OOM killer picked a victim, possibly Postgres. 2g gives a heap of
+    # about 1.5 GiB and leaves 512 MiB for metaspace, threads and buffers. Do not go
+    # down to 1g: resident memory is already about 730 MiB under light load.
+    mem_limit: 2g
 
     volumes:
       # Same path on both sides, and identical to STORAGE_LOCAL_DIR in .env and to the

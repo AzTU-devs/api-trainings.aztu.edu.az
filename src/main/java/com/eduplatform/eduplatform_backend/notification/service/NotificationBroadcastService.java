@@ -1,5 +1,6 @@
 package com.eduplatform.eduplatform_backend.notification.service;
 
+import com.eduplatform.eduplatform_backend.audit.service.AuditService;
 import com.eduplatform.eduplatform_backend.common.enums.NotificationChannel;
 import com.eduplatform.eduplatform_backend.common.enums.UserStatus;
 import com.eduplatform.eduplatform_backend.common.error.Errors;
@@ -18,10 +19,12 @@ public class NotificationBroadcastService {
 
     private final UserRepository users;
     private final NotificationDispatcher dispatcher;
+    private final AuditService audit;
 
-    public NotificationBroadcastService(UserRepository users, NotificationDispatcher dispatcher) {
+    public NotificationBroadcastService(UserRepository users, NotificationDispatcher dispatcher, AuditService audit) {
         this.users = users;
         this.dispatcher = dispatcher;
+        this.audit = audit;
     }
 
     @Transactional
@@ -46,6 +49,11 @@ public class NotificationBroadcastService {
         for (User u : recipients) {
             dispatcher.dispatch(u, "admin.broadcast", req.title(), req.body(), payload, NotificationChannel.IN_APP);
         }
+        // A message to many people is a consequential action like any other.
+        audit.record(AuditService.Actions.CREATE, "NOTIFICATION_BROADCAST", null, null,
+                AuditService.snapshot("target", req.target().name(),
+                        "role", req.role() == null ? null : req.role().name(),
+                        "title", req.title(), "recipients", recipients.size()));
         return recipients.size();
     }
 }

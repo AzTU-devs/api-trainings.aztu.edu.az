@@ -16,7 +16,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * thumbnailMediaId and trailerMediaId on course create, admin create and PATCH. They used to be
  * accepted and silently dropped, so no course could get a cover through the API. The media must
- * exist (404 MEDIA_NOT_FOUND), belong to the caller unless the caller is an admin
+ * exist (404 MEDIA_NOT_FOUND), belong to the caller, admins included
  * (403 MEDIA_FORBIDDEN), be READY, and be an image for the thumbnail or a video for the trailer
  * (422 INVALID_MEDIA_FOR_FIELD). PATCH follows the request's partial-update rule: an absent or
  * null id leaves the current media in place.
@@ -57,22 +57,34 @@ class CourseMediaTest extends AbstractIntegrationTest {
         assertThat(thumbnailInDb(course)).isEqualTo(png);
     }
 
-    /** Admins assemble courses from whatever the university uploaded, so ownership does not bind them. */
+    /**
+     * A cover is published to anonymous visitors, so ownership binds admins too: naming somebody
+     * else's private upload would publish it. An admin uses a file they uploaded themselves.
+     */
     @Test
-    void aSuperAdminCreatingACourseMayUseMediaTheTutorUploaded() {
+    void aSuperAdminCreatingACourseUsesTheirOwnUploadButNotTheTutors() {
         TestTutor tutor = newApprovedTutor("tutor");
-        UUID png = uploadMedia(login(tutor.email()), "cover.png", "image/png", TestFiles.png());
+        UUID tutorsPng = uploadMedia(login(tutor.email()), "cover.png", "image/png", TestFiles.png());
+        String superToken = login(newUser("super", "SUPER_ADMIN").email());
         Map<String, Object> course = courseRequest("admin-made", true);
-        course.put("thumbnailMediaId", png);
+        course.put("thumbnailMediaId", tutorsPng);
 
-        JsonNode created = api.post("/api/admin/courses").bearer(login(newUser("super", "SUPER_ADMIN").email()))
+        api.post("/api/admin/courses").bearer(superToken)
                 .json(Json.object("course", course, "tutorIds", List.of(tutor.profileId()),
+                        "authorizedTutorId", tutor.profileId()))
+                .send().expectError(403, "MEDIA_FORBIDDEN");
+
+        UUID ownPng = uploadMedia(superToken, "cover.png", "image/png", TestFiles.png());
+        Map<String, Object> second = courseRequest("admin-made", true);
+        second.put("thumbnailMediaId", ownPng);
+        JsonNode created = api.post("/api/admin/courses").bearer(superToken)
+                .json(Json.object("course", second, "tutorIds", List.of(tutor.profileId()),
                         "authorizedTutorId", tutor.profileId()))
                 .send().expectStatus(201).data();
 
-        assertThat(created.path("thumbnailMediaId").asText()).isEqualTo(png.toString());
+        assertThat(created.path("thumbnailMediaId").asText()).isEqualTo(ownPng.toString());
         assertThat(jdbc.queryForObject("select thumbnail_media_id from courses where id = ?", UUID.class,
-                UUID.fromString(created.path("id").asText()))).isEqualTo(png);
+                UUID.fromString(created.path("id").asText()))).isEqualTo(ownPng);
     }
 
     @Test

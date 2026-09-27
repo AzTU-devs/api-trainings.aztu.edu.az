@@ -21,10 +21,10 @@ public interface RoomMapper {
 
     AvailabilitySlotDto toAvailabilityDto(RoomAvailabilitySlot slot);
 
-    @Mapping(target = "roomId",   source = "room.id")
-    @Mapping(target = "roomName", source = "room.name")
-    @Mapping(target = "offlineCourseId", source = "offlineCourse.courseId")
-    @Mapping(target = "tutorId", source = "tutor.id")
+    // Everything here comes from the booking's own columns and read-only subselects, never from
+    // the lazy room / tutor / course proxies: see RoomBooking for why.
+    @Mapping(target = "offlineCourseId", expression = "java(booking.getOfflineCourse() == null ? null : booking.getOfflineCourse().getCourseId())")
+    @Mapping(target = "tutorId", expression = "java(booking.getTutor() == null ? null : booking.getTutor().getId())")
     RoomBookingDto toBookingDto(RoomBooking booking);
 
     default List<UUID> toImageIds(java.util.Set<RoomImage> images) {

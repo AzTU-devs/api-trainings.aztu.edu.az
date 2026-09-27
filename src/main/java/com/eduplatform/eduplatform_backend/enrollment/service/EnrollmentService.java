@@ -2,6 +2,7 @@ package com.eduplatform.eduplatform_backend.enrollment.service;
 
 import com.eduplatform.eduplatform_backend.audit.service.AuditService;
 import com.eduplatform.eduplatform_backend.common.enums.CourseStatus;
+import com.eduplatform.eduplatform_backend.common.enums.CourseType;
 import com.eduplatform.eduplatform_backend.common.enums.EnrollmentSource;
 import com.eduplatform.eduplatform_backend.common.enums.EnrollmentStatus;
 import com.eduplatform.eduplatform_backend.common.enums.LessonProgressStatus;
@@ -10,6 +11,8 @@ import com.eduplatform.eduplatform_backend.course.domain.Course;
 import com.eduplatform.eduplatform_backend.course.domain.Lesson;
 import com.eduplatform.eduplatform_backend.course.repo.CourseRepository;
 import com.eduplatform.eduplatform_backend.course.repo.LessonRepository;
+import com.eduplatform.eduplatform_backend.course.repo.OfflineCourseDetailsRepository;
+import com.eduplatform.eduplatform_backend.course.service.CourseAccess;
 import com.eduplatform.eduplatform_backend.enrollment.domain.Enrollment;
 import com.eduplatform.eduplatform_backend.enrollment.domain.LessonProgress;
 import com.eduplatform.eduplatform_backend.enrollment.domain.LessonProgressId;
@@ -28,6 +31,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.EnumSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 @Service
@@ -38,31 +45,55 @@ public class EnrollmentService {
     private final CourseRepository courses;
     private final LessonRepository lessons;
     private final UserRepository users;
+    private final OfflineCourseDetailsRepository offlineDetails;
     private final AuditService audit;
 
     /** Roster order: newest grant first, with the id breaking ties so a page never repeats a row. */
     private static final Sort NEWEST_GRANT_FIRST = Sort.by(Sort.Order.desc("enrolledAt"), Sort.Order.asc("id"));
 
+    /** What deleting an account cancels: every place it holds, and any payment still pending. */
+    private static final Set<EnrollmentStatus> RELEASED_WITH_ACCOUNT = EnumSet.of(
+            EnrollmentStatus.ACTIVE, EnrollmentStatus.COMPLETED, EnrollmentStatus.PENDING_PAYMENT);
+
     public EnrollmentService(EnrollmentRepository enrollments, LessonProgressRepository progress,
                              CourseRepository courses, LessonRepository lessons, UserRepository users,
-                             AuditService audit) {
+                             OfflineCourseDetailsRepository offlineDetails, AuditService audit) {
         this.enrollments = enrollments;
         this.progress = progress;
         this.courses = courses;
         this.lessons = lessons;
         this.users = users;
+        this.offlineDetails = offlineDetails;
         this.audit = audit;
     }
 
-    /** Free-tier or admin-grant enrollment. Paid enrollments are created by the payment flow. */
+    /**
+     * Free-tier or admin-grant enrollment. Paid enrollments are created by the payment flow.
+     *
+     * <p>A participant an administrator removed keeps a CANCELLED row, and enrolling again is
+     * refused with 403 ENROLLMENT_REVOKED rather than silently reinstating them: whether a removed
+     * participant may come back is the administrators' call, made from the participants screen.
+     *
+     * <p>An in-person course has a fixed number of seats. The seat is claimed with one conditional
+     * UPDATE before the enrolment is written, so two participants racing for the last seat cannot
+     * both get it; the loser is refused with 409 COURSE_FULL and the transaction rolls back.
+     */
     @Transactional
     public Enrollment enroll(UUID userId, UUID courseId, EnrollmentSource source) {
         Course course = requireCourse(courseId);
         if (course.getStatus() != CourseStatus.PUBLISHED) {
             throw Errors.conflict("COURSE_NOT_PUBLISHED", "Cannot enrol in a non-published course");
         }
-        if (enrollments.existsByUserIdAndCourseId(userId, courseId)) {
-            throw Errors.conflict("ALREADY_ENROLLED", "You are already enrolled in this course");
+        Enrollment existing = enrollments.findByUserIdAndCourseId(userId, courseId).orElse(null);
+        if (existing != null) {
+            if (CourseAccess.holdsAPlace(existing.getStatus())) {
+                throw Errors.conflict("ALREADY_ENROLLED", "You are already enrolled in this course");
+            }
+            if (existing.getStatus() == EnrollmentStatus.CANCELLED) {
+                throw Errors.forbidden("ENROLLMENT_REVOKED",
+                        "Your place on this course was withdrawn; contact the administrators to rejoin");
+            }
+            throw Errors.conflict("ALREADY_ENROLLED", "You already have an enrolment on this course");
         }
         // Only the FREE route is gated on price. An ADMIN_GRANT is meant to bypass payment, and a
         // PURCHASE enrollment is created once the payment flow has taken the money.
@@ -81,6 +112,9 @@ public class EnrollmentService {
                 .enrolledAt(Instant.now())
                 .build();
         e.setId(UUID.randomUUID());
+        if (course.getCourseType() == CourseType.OFFLINE && offlineDetails.claimSeat(courseId) == 0) {
+            throw Errors.conflict("COURSE_FULL", "Every seat on this training is taken");
+        }
         e = enrollments.save(e);
 
         courses.incrementEnrolledCount(courseId);
@@ -97,14 +131,22 @@ public class EnrollmentService {
     public java.util.List<LessonProgress> courseProgress(UUID userId, UUID courseId) {
         Enrollment e = enrollments.findByUserIdAndCourseId(userId, courseId)
                 .orElseThrow(() -> Errors.notFound("ENROLLMENT_NOT_FOUND", "You are not enrolled in this course"));
+        requirePlace(e);
         return progress.findAllByEnrollmentId(e.getId());
     }
 
+    /**
+     * Records progress on one lesson and recomputes the course percentage. Only a participant who
+     * holds a place may: a removed participant's CANCELLED row used to accept progress, and
+     * reaching 100% flipped it back to COMPLETED — reinstating on the roster, with the course's
+     * count unchanged, somebody an administrator had just taken off.
+     */
     @Transactional
     public LessonProgress updateProgress(UUID userId, UUID courseId, UUID lessonId,
                                          LessonProgressUpdateRequest req) {
         Enrollment e = enrollments.findByUserIdAndCourseId(userId, courseId)
                 .orElseThrow(() -> Errors.forbidden("NOT_ENROLLED", "You are not enrolled in this course"));
+        requirePlace(e);
         Lesson lesson = lessons.findById(lessonId)
                 .orElseThrow(() -> Errors.notFound("LESSON_NOT_FOUND", "Lesson does not exist"));
         if (!lesson.getModule().getCourse().getId().equals(courseId)) {
@@ -128,13 +170,16 @@ public class EnrollmentService {
         }
         progress.save(lp);
 
-        // Recompute coarse progress %
+        // Recompute coarse progress %. Both counts cover the course's live lessons only: counting
+        // the completions of lessons deleted since went past 100%, which the CHECK on the column
+        // refused, so once a completed lesson was deleted every later save failed with 409. The
+        // clamp is a second line of defence for the same constraint.
         long total = lessons.countByCourseId(courseId);
-        long completed = progress.countCompletedByEnrollment(e.getId());
-        short pct = total == 0 ? 0 : (short) Math.round(100.0 * completed / total);
+        long completed = progress.countCompletedLiveLessons(e.getId(), courseId);
+        short pct = total == 0 ? 0 : (short) Math.min(100, Math.round(100.0 * completed / total));
         e.setProgressPercent(pct);
         e.setLastAccessedAt(Instant.now());
-        if (pct == 100 && e.getCompletedAt() == null) {
+        if (pct == 100 && e.getCompletedAt() == null && e.getStatus() == EnrollmentStatus.ACTIVE) {
             e.setCompletedAt(Instant.now());
             e.setStatus(EnrollmentStatus.COMPLETED);
         }
@@ -199,6 +244,11 @@ public class EnrollmentService {
         }
         e = enrollments.save(e);
         courses.incrementEnrolledCount(courseId);
+        if (course.getCourseType() == CourseType.OFFLINE) {
+            // Counted even past the limit: an administrator seating somebody by hand has decided
+            // the room can take them, but the seat is still taken.
+            offlineDetails.incrementEnrolledCount(courseId);
+        }
 
         audit.record(AuditService.Actions.CREATE, "ENROLLMENT", e.getId(),
                 before == null ? null : AuditService.snapshot("status", before.name()),
@@ -209,12 +259,13 @@ public class EnrollmentService {
 
     /**
      * Revokes a granted place. The enrolment is cancelled rather than deleted, because the
-     * lesson progress, attendance and certificates behind it — and the audit trail pointing at
-     * it — have to outlive the removal.
+     * lesson progress and attendance behind it — and the audit trail pointing at it — have to
+     * outlive the removal. A CANCELLED enrolment grants nothing: no lesson files, no progress
+     * and no review (see CourseAccess.PLACE_HOLDING).
      */
     @Transactional
     public void removeParticipant(UUID courseId, UUID userId) {
-        requireCourse(courseId);
+        Course course = requireCourse(courseId);
         Enrollment e = enrollments.findByUserIdAndCourseId(userId, courseId)
                 .orElseThrow(() -> Errors.notFound("ENROLLMENT_NOT_FOUND",
                         "This user is not enrolled in this course"));
@@ -228,12 +279,53 @@ public class EnrollmentService {
             // Only a place that was counted is handed back; a PENDING_PAYMENT or REFUNDED row
             // never added to the tally, and decrementing it would under-report the course.
             courses.decrementEnrolledCount(courseId);
+            if (course.getCourseType() == CourseType.OFFLINE) {
+                offlineDetails.decrementEnrolledCount(courseId);
+            }
         }
 
         audit.record(AuditService.Actions.DELETE, "ENROLLMENT", e.getId(),
                 AuditService.snapshot("status", before.name()),
                 AuditService.snapshot("status", EnrollmentStatus.CANCELLED.name(),
                         "courseId", courseId.toString(), "userId", userId.toString()));
+    }
+
+    /**
+     * Gives back every place an account holds, as part of deleting the account, and recounts the
+     * courses they were on. Deleting a participant used to cancel nothing: the roster (which lists
+     * live accounts) showed nobody, while an in-person course went on counting the seat, so it
+     * could read as full with no one on it, and no one could see or free the seat. A pending
+     * payment is cancelled too, so no checkout completes for an account that is gone.
+     *
+     * <p>Cancelled rather than deleted, as {@link #removeParticipant} does, so the progress and
+     * attendance behind each place outlive it, and each is audited like a removal.
+     *
+     * @return how many enrolments were cancelled
+     */
+    @Transactional
+    public int releasePlacesOf(UUID userId) {
+        List<Enrollment> held = enrollments.findAllByUserIdAndStatusIn(userId, RELEASED_WITH_ACCOUNT);
+        if (held.isEmpty()) return 0;
+        Set<UUID> courseIds = new LinkedHashSet<>();
+        for (Enrollment e : held) {
+            EnrollmentStatus before = e.getStatus();
+            UUID courseId = e.getCourse().getId();   // off the proxy: no load
+            e.setStatus(EnrollmentStatus.CANCELLED);
+            courseIds.add(courseId);
+            audit.record(AuditService.Actions.DELETE, "ENROLLMENT", e.getId(),
+                    AuditService.snapshot("status", before.name()),
+                    AuditService.snapshot("status", EnrollmentStatus.CANCELLED.name(),
+                            "courseId", courseId.toString(), "userId", userId.toString(),
+                            "reason", "ACCOUNT_DELETED"));
+        }
+        enrollments.saveAll(held);
+        // Recounted, not stepped down: the recount flushes the cancellations first and then
+        // counts what is really held, which also mends a count earlier deletions let drift.
+        for (UUID courseId : courseIds) {
+            courses.recountEnrolled(courseId);
+            offlineDetails.recountEnrolled(courseId);
+        }
+        return held.size();
     }
 
     // ---------- helpers ----------
@@ -263,7 +355,13 @@ public class EnrollmentService {
 
     /** The statuses that occupy a place on the course, and so are counted in enrolledCount. */
     private static boolean holdsAPlace(EnrollmentStatus status) {
-        return status == EnrollmentStatus.ACTIVE || status == EnrollmentStatus.COMPLETED;
+        return CourseAccess.holdsAPlace(status);
+    }
+
+    private static void requirePlace(Enrollment e) {
+        if (!holdsAPlace(e.getStatus())) {
+            throw Errors.forbidden("NOT_ENROLLED", "You no longer hold a place on this course");
+        }
     }
 
     private static CourseParticipantDto toParticipantDto(Enrollment e) {

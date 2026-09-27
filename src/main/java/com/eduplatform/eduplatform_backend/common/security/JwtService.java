@@ -38,7 +38,11 @@ public class JwtService {
         this.accessTtl = Duration.ofMinutes(props.accessTtlMinutes());
     }
 
-    public IssuedToken issueAccess(UUID userId, String email, List<String> roles, List<String> permissions) {
+    /** Claim holding the account's token_version at issue time; see UserSessionState. */
+    public static final String VERSION_CLAIM = "ver";
+
+    public IssuedToken issueAccess(UUID userId, String email, List<String> roles, List<String> permissions,
+                                   long tokenVersion) {
         Instant now = Instant.now();
         Instant exp = now.plus(accessTtl);
         String jwt = Jwts.builder()
@@ -50,6 +54,7 @@ public class JwtService {
                 .claim("email", email)
                 .claim("roles", roles)
                 .claim("perms", permissions)
+                .claim(VERSION_CLAIM, tokenVersion)
                 .signWith(signingKey, Jwts.SIG.HS256)
                 .compact();
         return new IssuedToken(jwt, exp);
@@ -73,6 +78,15 @@ public class JwtService {
     public static List<String> stringList(Map<String, Object> claims, String key) {
         Object v = claims.get(key);
         return v instanceof List<?> l ? (List<String>) l : List.of();
+    }
+
+    /**
+     * The token_version a token was issued under. A token minted before the claim existed has
+     * none and counts as version 0, the value every account started from, so the deploy that
+     * introduced the claim signed nobody out.
+     */
+    public static long tokenVersion(Map<String, Object> claims) {
+        return claims.get(VERSION_CLAIM) instanceof Number n ? n.longValue() : 0L;
     }
 
     public record IssuedToken(String token, Instant expiresAt) {}

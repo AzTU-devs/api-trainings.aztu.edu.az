@@ -6,6 +6,7 @@ import com.eduplatform.eduplatform_backend.identity.repo.AuthActionTokenReposito
 import com.eduplatform.eduplatform_backend.identity.repo.OAuthAuthStateRepository;
 import com.eduplatform.eduplatform_backend.identity.repo.RefreshTokenRepository;
 import com.eduplatform.eduplatform_backend.identity.repo.TutorRegistrationOtpRepository;
+import com.eduplatform.eduplatform_backend.identity.service.LoginSecurityService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -16,7 +17,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 
-/** Periodic housekeeping: purges expired OTPs, OAuth states, and stale refresh tokens. */
+/** Periodic housekeeping: purges expired OTPs, OAuth states, stale refresh tokens and sign-in throttles. */
 @Component
 public class CleanupScheduler {
 
@@ -28,6 +29,7 @@ public class CleanupScheduler {
     private final RefreshTokenRepository refreshTokens;
     private final AuthActionTokenRepository authActionTokens;
     private final ApiLogService apiLogs;
+    private final LoginSecurityService loginSecurity;
     private final int apiLogRetentionDays;
 
     public CleanupScheduler(TutorRegistrationOtpRepository tutorOtps,
@@ -36,6 +38,7 @@ public class CleanupScheduler {
                             RefreshTokenRepository refreshTokens,
                             AuthActionTokenRepository authActionTokens,
                             ApiLogService apiLogs,
+                            LoginSecurityService loginSecurity,
                             @Value("${app.cleanup.api-log-retention-days:30}") int apiLogRetentionDays) {
         this.tutorOtps = tutorOtps;
         this.adminOtps = adminOtps;
@@ -43,6 +46,7 @@ public class CleanupScheduler {
         this.refreshTokens = refreshTokens;
         this.authActionTokens = authActionTokens;
         this.apiLogs = apiLogs;
+        this.loginSecurity = loginSecurity;
         this.apiLogRetentionDays = apiLogRetentionDays;
     }
 
@@ -58,9 +62,12 @@ public class CleanupScheduler {
         // Keep recently-expired refresh tokens a week for family-reuse forensics, then drop them.
         int tokens = refreshTokens.deleteExpired(now.minus(7, ChronoUnit.DAYS));
         int apiLogRows = apiLogs.purgeOlderThan(now.minus(apiLogRetentionDays, ChronoUnit.DAYS));
-        if (tutor + admin + states + actionTokens + tokens + apiLogRows > 0) {
-            log.info("Cleanup purged tutorOtps={} adminOtps={} oauthStates={} authActionTokens={} refreshTokens={} apiLogs={}",
-                    tutor, admin, states, actionTokens, tokens, apiLogRows);
+        // Sign-in throttle rows for addresses nobody has failed on for a day; any address,
+        // registered or not, gets one on its first wrong password.
+        int throttles = loginSecurity.purgeStale();
+        if (tutor + admin + states + actionTokens + tokens + apiLogRows + throttles > 0) {
+            log.info("Cleanup purged tutorOtps={} adminOtps={} oauthStates={} authActionTokens={} refreshTokens={} apiLogs={} loginThrottles={}",
+                    tutor, admin, states, actionTokens, tokens, apiLogRows, throttles);
         }
     }
 }

@@ -19,6 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -45,17 +46,39 @@ public class AuditService {
         this.users = users;
     }
 
-    /** Record an audit entry for the current authenticated actor. Never throws into the caller. */
+    /**
+     * Record an audit entry for the current authenticated actor. Never throws into the caller.
+     *
+     * <p>An UPDATE whose before and after snapshots are equal is not recorded: an edit that
+     * changed nothing — a PATCH of {} or a form saved untouched — is not a consequential action,
+     * and a row with nothing in its diff only buries the ones that matter. The snapshots are maps
+     * of strings, numbers, booleans and sorted lists, so equality is exact.
+     */
     @Transactional
     public void record(String action, String entityType, UUID entityId,
                        Map<String, Object> before, Map<String, Object> after) {
+        AuthenticatedPrincipal me = currentPrincipal();
+        record(me == null ? null : me.userId(),
+                me == null || me.roles().isEmpty() ? null : me.roles().iterator().next(),
+                action, entityType, entityId, before, after);
+    }
+
+    /**
+     * As {@link #record(String, String, UUID, Map, Map)} for an actor who is not (yet) the
+     * authenticated principal of the request — the account signing in, for one.
+     */
+    @Transactional
+    public void record(UUID actorId, String actorRole, String action, String entityType, UUID entityId,
+                       Map<String, Object> before, Map<String, Object> after) {
+        if (Actions.UPDATE.equals(action) && before != null && Objects.equals(before, after)) {
+            return;
+        }
         try {
-            AuthenticatedPrincipal me = currentPrincipal();
             HttpServletRequest req = currentRequest();
             AuditLog row = AuditLog.builder()
                     .id(UUID.randomUUID())
-                    .actorId(me == null ? null : me.userId())
-                    .actorRole(me == null || me.roles().isEmpty() ? null : me.roles().iterator().next())
+                    .actorId(actorId)
+                    .actorRole(actorRole)
                     .action(action)
                     .entityType(entityType)
                     .entityId(entityId)
@@ -155,11 +178,20 @@ public class AuditService {
         return (s == null || s.isBlank()) ? null : s.trim();
     }
 
-    /** Convenience for callers building before/after snapshots without importing Map directly. */
+    /**
+     * Convenience for callers building before/after snapshots without importing Map directly.
+     *
+     * <p>A {@link BigDecimal} is stored as its plain text with the trailing zeros stripped, so two
+     * snapshots compare numbers by value. BigDecimal's own equals — and its plain string — keep
+     * the scale, and a price read back as 50.00 against the 50 or 50.0 a browser form sends was
+     * recorded as a change of price on every untouched save.
+     */
     public static Map<String, Object> snapshot(Object... kv) {
         Map<String, Object> m = new HashMap<>();
         for (int i = 0; i + 1 < kv.length; i += 2) {
-            m.put(String.valueOf(kv[i]), kv[i + 1]);
+            Object value = kv[i + 1];
+            m.put(String.valueOf(kv[i]),
+                    value instanceof BigDecimal number ? number.stripTrailingZeros().toPlainString() : value);
         }
         return m;
     }
@@ -173,6 +205,8 @@ public class AuditService {
         public static final String REJECT = "REJECT";
         public static final String PUBLISH = "PUBLISH";
         public static final String ARCHIVE = "ARCHIVE";
+        public static final String LOGIN = "LOGIN";
+        public static final String LOGOUT = "LOGOUT";
         public static final String OTHER = "OTHER";
         private Actions() {}
     }

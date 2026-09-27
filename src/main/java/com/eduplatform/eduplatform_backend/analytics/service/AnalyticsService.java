@@ -14,12 +14,13 @@ import com.eduplatform.eduplatform_backend.room.repo.RoomBookingRepository;
 import com.eduplatform.eduplatform_backend.room.repo.RoomRepository;
 import com.eduplatform.eduplatform_backend.tutor.repo.TutorProfileRepository;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.time.LocalDate;
-import java.time.ZoneOffset;
+import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.UUID;
@@ -35,14 +36,22 @@ public class AnalyticsService {
     private final RoomRepository rooms;
     private final RoomBookingRepository bookings;
 
+    /**
+     * The university's zone. Days and months are Baku's: in UTC an enrolment made between midnight
+     * and 04:00 local time counted on the previous day, or the previous month.
+     */
+    private final ZoneId zone;
+
     public AnalyticsService(UserRepository users, TutorProfileRepository tutors, CourseRepository courses,
-                            EnrollmentRepository enrollments, RoomRepository rooms, RoomBookingRepository bookings) {
+                            EnrollmentRepository enrollments, RoomRepository rooms, RoomBookingRepository bookings,
+                            @Value("${app.timezone:Asia/Baku}") String zone) {
         this.users = users;
         this.tutors = tutors;
         this.courses = courses;
         this.enrollments = enrollments;
         this.rooms = rooms;
         this.bookings = bookings;
+        this.zone = ZoneId.of(zone);
     }
 
     @Transactional(readOnly = true)
@@ -53,10 +62,10 @@ public class AnalyticsService {
             default -> 30;
         };
         Instant since = Instant.now().minus(days, ChronoUnit.DAYS);
-        Instant monthStart = LocalDate.now(ZoneOffset.UTC).withDayOfMonth(1).atStartOfDay(ZoneOffset.UTC).toInstant();
+        Instant monthStart = LocalDate.now(zone).withDayOfMonth(1).atStartOfDay(zone).toInstant();
         double capacityHoursPerRoom = days * 12.0; // 12 bookable hours/day baseline
 
-        List<AnalyticsOverviewDto.TrendPoint> trend = enrollments.findEnrollmentTrend(since).stream()
+        List<AnalyticsOverviewDto.TrendPoint> trend = enrollments.findEnrollmentTrend(since, zone.getId()).stream()
                 .map(p -> new AnalyticsOverviewDto.TrendPoint(p.getDay(), p.getCnt()))
                 .toList();
 
@@ -80,7 +89,7 @@ public class AnalyticsService {
 
         return new AnalyticsOverviewDto(
                 enrollments.countDistinctStudentsByStatus(EnrollmentStatus.ACTIVE),
-                tutors.countByApprovalStatus(TutorApprovalStatus.APPROVED),
+                tutors.countWithLiveAccountByApprovalStatus(TutorApprovalStatus.APPROVED),
                 courses.countByStatus(CourseStatus.PUBLISHED),
                 enrollments.countByEnrolledAtAfter(monthStart),
                 trend, topCourses, topCategories, roomUtil);
@@ -90,7 +99,7 @@ public class AnalyticsService {
     public AdminDashboardDto adminDashboard() {
         return new AdminDashboardDto(
                 users.count(),
-                tutors.countByApprovalStatus(TutorApprovalStatus.PENDING),
+                tutors.countWithLiveAccountByApprovalStatus(TutorApprovalStatus.PENDING),
                 courses.countByStatus(CourseStatus.IN_REVIEW),
                 courses.countByStatus(CourseStatus.PUBLISHED),
                 rooms.count(),

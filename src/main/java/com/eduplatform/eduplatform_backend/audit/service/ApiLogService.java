@@ -26,8 +26,11 @@ public class ApiLogService {
         this.repo = repo;
     }
 
-    /** Best-effort async persistence from the access interceptor; never blocks or throws into the request path. */
-    @Async
+    /**
+     * Best-effort async persistence from the access interceptor; never blocks or throws into the
+     * request path. Runs on the bounded apiLogExecutor (see AsyncConfig), not a thread per call.
+     */
+    @Async("apiLogExecutor")
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void record(ApiRequestLog row) {
         try {

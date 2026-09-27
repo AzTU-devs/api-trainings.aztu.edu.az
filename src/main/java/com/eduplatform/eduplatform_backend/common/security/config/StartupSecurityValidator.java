@@ -20,7 +20,9 @@ import java.util.Map;
 
 /**
  * Refuses to start when the app is configured in a way that is fine locally but wrong
- * once deployed. Every check is a no-op under the {@code dev} profile.
+ * once deployed. The checks are skipped only when {@code dev} is the one and only active
+ * profile; {@code dev} combined with anything else is refused outright (see
+ * {@link #requireDevAlone}).
  *
  * <p>Implemented as a {@link BeanFactoryPostProcessor} rather than an ordinary bean so it
  * runs <em>before</em> any singleton is created — in particular before {@code flywayInitializer}.
@@ -34,9 +36,12 @@ import java.util.Map;
  *   <li>JWT signing secret is neither a placeholder nor shorter than HS256 requires.</li>
  *   <li>The Flyway path excludes {@code db/dev}, which seeds login-ready ADMIN and
  *       SUPER_ADMIN accounts sharing the password {@code Password123!}.</li>
+ *   <li>CORS allows credentials, so every allowed origin can call the API as the signed-in
+ *       user: no wildcard, no {@code null} origin and no plain-http origin.</li>
  * </ul>
  * It also warns about settings that start fine but are probably not what the operator meant
- * (localhost CORS origins, the retired {@code TRUST_FORWARD_HEADERS}).
+ * (localhost CORS origins, mail switched off, insecure cookies, rate limiting off, public API
+ * docs, open admin self-registration, the retired {@code TRUST_FORWARD_HEADERS}).
  */
 @Component
 public class StartupSecurityValidator implements BeanFactoryPostProcessor {
@@ -70,15 +75,102 @@ public class StartupSecurityValidator implements BeanFactoryPostProcessor {
         this.env = beanFactory.getBean(
                 ConfigurableApplicationContext.ENVIRONMENT_BEAN_NAME, Environment.class);
 
-        if (Arrays.asList(env.getActiveProfiles()).contains("dev")) {
+        List<String> profiles = Arrays.asList(env.getActiveProfiles());
+        rejectPlaceholderSecretInAnyProfile(resolve("app.security.jwt.access-secret"));
+        if (profiles.contains("dev")) {
+            requireDevAlone(profiles);
             return;
         }
 
         requireSettings();
         checkJwtSecret(resolve("app.security.jwt.access-secret"));
         checkFlywayLocations(resolve("spring.flyway.locations"));
+        checkCorsOrigins(resolve("app.cors.allowed-origins"));
         warnOnLocalhostCors(resolve("app.cors.allowed-origins"));
+        warnOnRiskyFlags();
         noteRetiredForwardHeaderFlag();
+    }
+
+    /**
+     * {@code dev} next to another profile is refused rather than half-applied. With
+     * {@code SPRING_PROFILES_ACTIVE=prod,dev} the last profile wins, so the dev seeds (login-ready
+     * admin accounts with a published password) were added to the Flyway path — and, since this
+     * validator used to stand down whenever dev was among the profiles, every check here was
+     * skipped as well. Only a deployment that is dev and nothing else is treated as local.
+     */
+    private static void requireDevAlone(List<String> profiles) {
+        if (profiles.size() > 1) {
+            throw new IllegalStateException(
+                    "Refusing to start: the dev profile is active together with " + profiles
+                            + ". dev seeds accounts with a well-known password and switches these checks "
+                            + "off, so it may only ever run on its own. Set SPRING_PROFILES_ACTIVE to prod "
+                            + "for any deployment, or to dev alone on a developer machine.");
+        }
+    }
+
+    /** The .env.example placeholder is never a real secret, whatever the profile. */
+    private static void rejectPlaceholderSecretInAnyProfile(String accessSecret) {
+        if (accessSecret != null && accessSecret.toLowerCase(Locale.ROOT).contains("change-me")) {
+            throw new IllegalStateException(
+                    "Refusing to start: app.security.jwt.access-secret is still the change-me placeholder. "
+                            + "Set JWT_ACCESS_SECRET to a strong random value, e.g. `openssl rand -base64 48`.");
+        }
+    }
+
+    /**
+     * Every allowed origin is trusted with credentials (CorsConfig sets allowCredentials), so the
+     * list must name exact https origins. A wildcard pattern — "*" included, which
+     * setAllowedOriginPatterns accepts where setAllowedOrigins would not — reflected any site's
+     * Origin back with credentials; "null" is the origin of sandboxed frames and local files; and
+     * a plain-http origin can be impersonated by anyone on the network path.
+     */
+    private void checkCorsOrigins(String corsOrigins) {
+        if (corsOrigins == null) return;
+        List<String> bad = new ArrayList<>();
+        for (String raw : corsOrigins.split(",")) {
+            String origin = raw.trim();
+            if (origin.isEmpty()) continue;
+            String lower = origin.toLowerCase(Locale.ROOT);
+            boolean localhost = lower.startsWith("http://localhost") || lower.startsWith("http://127.0.0.1");
+            if (origin.contains("*") || lower.equals("null") || (lower.startsWith("http://") && !localhost)
+                    || !(lower.startsWith("http://") || lower.startsWith("https://"))) {
+                bad.add(origin);
+            }
+        }
+        if (!bad.isEmpty()) {
+            throw new IllegalStateException(
+                    "Refusing to start: app.cors.allowed-origins (CORS_ALLOWED_ORIGINS) contains " + bad
+                            + ". Credentials are allowed for every listed origin, so each must be an exact "
+                            + "https:// origin such as https://dashboard-trainings.aztu.edu.az — no wildcards, "
+                            + "no \"null\", no plain http.");
+        }
+    }
+
+    /**
+     * Settings that start fine and may be deliberate — the admin-bootstrap runbook runs with mail
+     * off on purpose — but that nobody should find out about from an incident. A warning each,
+     * not a failure.
+     */
+    private void warnOnRiskyFlags() {
+        if (!"true".equalsIgnoreCase(String.valueOf(resolve("app.mail.enabled")).trim())
+                || !StringUtils.hasText(resolve("spring.mail.username"))) {
+            log.warn("Outgoing mail is OFF (MAIL_ENABLED is not true, or MAIL_USERNAME is blank): sign-up codes, "
+                    + "email verification links, password resets and decision notices are NOT sent — they are "
+                    + "written to this log, token included. Configure SMTP and set MAIL_ENABLED=true.");
+        }
+        if ("false".equalsIgnoreCase(String.valueOf(resolve("app.security.cookies.secure")).trim())) {
+            log.warn("COOKIE_SECURE=false: the dashboard's refresh-token cookie is sent over plain HTTP.");
+        }
+        if ("false".equalsIgnoreCase(String.valueOf(resolve("app.ratelimit.enabled")).trim())) {
+            log.warn("RATE_LIMIT_ENABLED=false: login, sign-up and password-reset endpoints have no rate limit.");
+        }
+        if ("true".equalsIgnoreCase(String.valueOf(resolve("springdoc.api-docs.enabled")).trim())) {
+            log.warn("SWAGGER_ENABLED=true: the full API description is served publicly at /v3/api-docs.");
+        }
+        if ("true".equalsIgnoreCase(String.valueOf(resolve("app.security.admin-self-register-enabled")).trim())) {
+            log.warn("ADMIN_SELF_REGISTER=true: admin self-registration opens whenever no ADMIN or SUPER_ADMIN "
+                    + "exists. Set it back to false once the first administrator is created.");
+        }
     }
 
     /** Reports every missing setting at once — one redeploy per fix is a slow way to learn. */

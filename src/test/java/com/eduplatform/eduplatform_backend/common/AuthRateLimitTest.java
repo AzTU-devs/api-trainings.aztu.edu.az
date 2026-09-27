@@ -22,10 +22,14 @@ import static org.assertj.core.api.Assertions.assertThat;
         // which address the limiter uses; when true it used to hand out a fresh bucket per
         // X-Forwarded-For value.
         "app.security.trust-forward-headers=true",
+        // The shipped login budget (60 a minute) is sized for a computer lab behind one NAT
+        // address; a smaller one keeps these tests quick, and exercises the override path an
+        // operator would use.
+        "app.ratelimit.rules.login.capacity=10",
 })
 class AuthRateLimitTest extends AbstractIntegrationTest {
 
-    /** RateLimitRule.LOGIN's default capacity. */
+    /** The login capacity configured above. */
     private static final int LOGIN_BUDGET = 10;
 
     @Test

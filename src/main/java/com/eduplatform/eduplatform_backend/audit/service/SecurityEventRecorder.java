@@ -29,6 +29,7 @@ public class SecurityEventRecorder {
     public static final String TOKEN_REVOKED = "TOKEN_REVOKED";
     public static final String SUSPICIOUS_LOGIN = "SUSPICIOUS_LOGIN";
     public static final String IP_BLOCKED = "IP_BLOCKED";
+    public static final String IP_UNBLOCKED = "IP_UNBLOCKED";
     public static final String ACCOUNT_UNLOCKED = "ACCOUNT_UNLOCKED";
 
     private final SecurityEventRepository repo;

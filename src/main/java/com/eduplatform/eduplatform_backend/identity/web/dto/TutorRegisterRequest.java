@@ -1,5 +1,6 @@
 package com.eduplatform.eduplatform_backend.identity.web.dto;
 
+import com.eduplatform.eduplatform_backend.tutor.web.dto.HttpUrl;
 import jakarta.validation.constraints.*;
 
 import java.util.Set;
@@ -22,12 +23,16 @@ public record TutorRegisterRequest(
         @NotBlank @Size(max = 80) String firstName,
         @NotBlank @Size(max = 80) String lastName,
         @Size(max = 32) String phone,
-        @Size(max = 8) String locale,
+        @Pattern(regexp = ValidationPatterns.LOCALE_OR_BLANK, message = ValidationPatterns.LOCALE_MESSAGE)
+        String locale,
         // --- tutor profile ---
         @Size(max = 160) String headline,
         @Size(max = 5000) String bio,
-        @Min(0) Short yearsExperience,
-        @Size(max = 255) String websiteUrl,
-        @Size(max = 255) String linkedinUrl,
-        @NotNull @NotEmpty Set<UUID> categoryIds
+        // The same limits as the profile edit (UpdateTutorProfileRequest). Without them sign-up
+        // stored javascript: and data: links that the public expert page then rendered as hrefs,
+        // and a 500-year career that no later profile save could get past.
+        @Min(0) @Max(80) Short yearsExperience,
+        @Size(max = 255) @HttpUrl String websiteUrl,
+        @Size(max = 255) @HttpUrl String linkedinUrl,
+        @NotNull @NotEmpty Set<@NotNull UUID> categoryIds
 ) {}

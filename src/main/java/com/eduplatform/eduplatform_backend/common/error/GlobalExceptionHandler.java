@@ -2,9 +2,12 @@ package com.eduplatform.eduplatform_backend.common.error;
 
 import com.eduplatform.eduplatform_backend.common.web.ApiError;
 import com.eduplatform.eduplatform_backend.common.web.FieldErrorItem;
+import jakarta.persistence.EntityNotFoundException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.ConstraintViolationException;
 import org.slf4j.Logger;
+import org.hibernate.query.sqm.PathElementException;
+import org.hibernate.query.sqm.UnknownPathException;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.InvalidDataAccessApiUsageException;
@@ -12,6 +15,7 @@ import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.mapping.PropertyReferenceException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.orm.ObjectRetrievalFailureException;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.security.access.AccessDeniedException;
@@ -33,9 +37,11 @@ import org.springframework.web.multipart.MultipartException;
 import org.springframework.web.multipart.support.MissingServletRequestPartException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
+import java.sql.SQLException;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Set;
 
@@ -51,6 +57,7 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(AppException.class)
     public ResponseEntity<ApiError> handleApp(AppException ex, HttpServletRequest req) {
         return ResponseEntity.status(ex.status())
+                .headers(ex.headers())
                 .body(ApiError.of(ex.status().value(), ex.code(), ex.getMessage(), req.getRequestURI()));
     }
 
@@ -64,8 +71,9 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(ConstraintViolationException.class)
     public ResponseEntity<ApiError> handleConstraint(ConstraintViolationException ex, HttpServletRequest req) {
+        // No rejected value: see toItem.
         List<FieldErrorItem> items = ex.getConstraintViolations().stream()
-                .map(v -> new FieldErrorItem(v.getPropertyPath().toString(), "INVALID", v.getMessage(), v.getInvalidValue()))
+                .map(v -> new FieldErrorItem(v.getPropertyPath().toString(), "INVALID", v.getMessage(), null))
                 .toList();
         return ResponseEntity.badRequest().body(ApiError.validation(req.getRequestURI(), items));
     }
@@ -159,7 +167,36 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiError> handleDataAccessMisuse(InvalidDataAccessApiUsageException ex,
                                                            HttpServletRequest req) {
         PropertyReferenceException unknownProperty = propertyReferenceCause(ex);
-        return unknownProperty != null ? invalidSortProperty(unknownProperty, req) : handleAny(ex, req);
+        if (unknownProperty != null) return invalidSortProperty(unknownProperty, req);
+        // A @Query-backed endpoint appends the client's sort to its JPQL, so an unknown property
+        // surfaces from Hibernate's parser instead (UnknownPathException / PathElementException),
+        // and anything that is not a plain property name — "id;DROP TABLE users" — from Spring
+        // Data's own "Sort expression ... must only contain property references" check. Both are
+        // the same client mistake as above. Hibernate's message names entity classes, so it is
+        // not echoed.
+        if (isSortRejection(ex)) {
+            log.debug("Rejected an unusable sort", ex);
+            return ResponseEntity.badRequest().body(ApiError.of(400, "INVALID_SORT_PROPERTY",
+                    "Results cannot be sorted that way", req.getRequestURI()));
+        }
+        return handleAny(ex, req);
+    }
+
+    /**
+     * A lazy association pointing at a row that is gone — in practice a soft-deleted row that the
+     * target entity's {@code @SQLRestriction} hides, which Hibernate reports when the proxy is
+     * initialised. The services now refuse the deletions that caused these (see
+     * UserAdminService.delete, RoomService.delete), so this is a safety net for data that predates
+     * them: a 404 for the one resource, with a WARN to find the dangling row by, rather than a 500
+     * and an ERROR.
+     */
+    @ExceptionHandler({EntityNotFoundException.class, ObjectRetrievalFailureException.class})
+    public ResponseEntity<ApiError> handleDanglingReference(RuntimeException ex, HttpServletRequest req) {
+        log.warn("A referenced row no longer exists (soft-deleted?) while serving {}: {}",
+                req.getRequestURI(), ex.getMessage());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                ApiError.of(404, "RESOURCE_NOT_FOUND", "Something this resource refers to no longer exists",
+                        req.getRequestURI()));
     }
 
     @ExceptionHandler({NoSuchElementException.class})
@@ -168,12 +205,76 @@ public class GlobalExceptionHandler {
                 ApiError.of(404, "NOT_FOUND", ex.getMessage(), req.getRequestURI()));
     }
 
+    /**
+     * PG exclusion constraint, unique constraint, FK violation, etc. — and, sharing the exception
+     * type, data exceptions (SQLSTATE class 22: a NUL byte in a search, a value out of range), which
+     * are the request's fault and get 400 INVALID_INPUT rather than a 409 that says it conflicts
+     * with something. Violations of the constraints in {@link #KNOWN_CONSTRAINTS} are answered with
+     * the code the service's own pre-check uses, so losing a race to a concurrent request reads the
+     * same as arriving second.
+     */
     @ExceptionHandler(DataIntegrityViolationException.class)
     public ResponseEntity<ApiError> handleIntegrity(DataIntegrityViolationException ex, HttpServletRequest req) {
-        // PG exclusion constraint, unique constraint, FK violation, etc.
         log.debug("Data integrity violation", ex);
+        SQLException sql = sqlCause(ex);
+        String state = sql == null ? null : sql.getSQLState();
+        if (state != null && state.startsWith("22")) {
+            return ResponseEntity.badRequest().body(
+                    ApiError.of(400, "INVALID_INPUT", "The request contains a value that cannot be stored",
+                            req.getRequestURI()));
+        }
+        String constraint = constraintName(ex);
+        String[] known = constraint == null ? null : KNOWN_CONSTRAINTS.get(constraint);
+        if (known != null) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(
+                    ApiError.of(409, known[0], known[1], req.getRequestURI()));
+        }
         return ResponseEntity.status(HttpStatus.CONFLICT).body(
                 ApiError.of(409, "CONSTRAINT_VIOLATION", "Operation conflicts with existing data", req.getRequestURI()));
+    }
+
+    /** Constraint name → the code and message its service-level pre-check answers with. */
+    private static final Map<String, String[]> KNOWN_CONSTRAINTS = Map.of(
+            "uq_users_email_active", new String[]{"EMAIL_ALREADY_REGISTERED",
+                    "An account with this email already exists"},
+            "uq_categories_slug_live", new String[]{"SLUG_ALREADY_EXISTS", "That category slug is taken"},
+            "courses_slug_key", new String[]{"SLUG_ALREADY_EXISTS", "That course slug is taken"},
+            "excl_room_overlap", new String[]{"ROOM_TIME_TAKEN",
+                    "Requested time overlaps an existing approved booking"},
+            "uq_rooms_building_number", new String[]{"ROOM_NUMBER_TAKEN",
+                    "A room already exists at that building and number"},
+            "uq_course_modules_order_live", new String[]{"ORDER_INDEX_TAKEN",
+                    "Another module is already at that position; move that one to a free position first"},
+            "uq_lessons_module_order_live", new String[]{"ORDER_INDEX_TAKEN",
+                    "Another lesson is already at that position; move that one to a free position first"});
+
+    private static SQLException sqlCause(Throwable ex) {
+        Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (Throwable t = ex; t != null && seen.add(t); t = t.getCause()) {
+            if (t instanceof SQLException sql) return sql;
+        }
+        return null;
+    }
+
+    /** The violated constraint, as Hibernate's dialect extracted it from the driver's error. */
+    private static String constraintName(Throwable ex) {
+        Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (Throwable t = ex; t != null && seen.add(t); t = t.getCause()) {
+            if (t instanceof org.hibernate.exception.ConstraintViolationException cve) {
+                return cve.getConstraintName();
+            }
+        }
+        return null;
+    }
+
+    private static boolean isSortRejection(Throwable ex) {
+        Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (Throwable t = ex; t != null && seen.add(t); t = t.getCause()) {
+            if (t instanceof UnknownPathException || t instanceof PathElementException) return true;
+            String message = t.getMessage();
+            if (message != null && message.startsWith("Sort expression")) return true;
+        }
+        return false;
     }
 
     @ExceptionHandler(OptimisticLockingFailureException.class)
@@ -272,9 +373,15 @@ public class GlobalExceptionHandler {
                 ApiError.of(400, "MISSING_PARAMETER", "Required " + what + " is missing", req.getRequestURI()));
     }
 
+    /**
+     * The submitted value is deliberately not echoed. Nothing reads it, and for the fields that
+     * fail most often it is a password: a sign-up with a weak one answered with the password in
+     * plain text, once per rule it broke, straight into the BFF's, the proxy's and the error
+     * tracker's logs.
+     */
     private static FieldErrorItem toItem(FieldError fe) {
         return new FieldErrorItem(fe.getField(),
                 fe.getCode() == null ? "INVALID" : fe.getCode().toUpperCase(),
-                fe.getDefaultMessage(), fe.getRejectedValue());
+                fe.getDefaultMessage(), null);
     }
 }
