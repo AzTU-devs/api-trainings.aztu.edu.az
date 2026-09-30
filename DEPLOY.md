@@ -59,7 +59,7 @@ you almost certainly want to set:
 | `STORAGE_LOCAL_DIR` | `/opt/uploads` | Must equal the container side of the mounted volume — see [Uploads](#uploads). |
 | `PAYMENTS_ENABLED` | `false` | Free-only mode. See [Free-only mode](#free-only-mode). |
 | `RATE_LIMIT_ENABLED` | `true` | Per-IP buckets on the unauthenticated auth endpoints. Leave on. |
-| `UPLOAD_MAX_IMAGE_MB` / `UPLOAD_MAX_VIDEO_MB` / `UPLOAD_MAX_DOCUMENT_MB` | `10` / `512` / `25` | See [Upload sizes](#upload-sizes). |
+| `UPLOAD_MAX_IMAGE_MB` / `UPLOAD_MAX_VIDEO_MB` / `UPLOAD_MAX_DOCUMENT_MB` | `200` / `512` / `200` | See [Upload sizes](#upload-sizes). |
 | `MAIL_ENABLED` | `false` | While false, OTP/verification/password-reset emails are logged (body included), not sent — so those flows do not work for real users. See [Mail](#mail). |
 | `MAIL_FROM` | `no-reply@eduplatform.local` | Envelope sender; set it to a real mailbox on your domain. |
 | `SWAGGER_ENABLED` | `false` | Swagger UI and `/v3/api-docs` are off in prod. |
@@ -101,19 +101,24 @@ Uploads take one of two paths, and on each the smallest ceiling wins:
 
 | Where | Setting | Value |
 | --- | --- | --- |
-| API, per media kind | `UPLOAD_MAX_IMAGE_MB` / `UPLOAD_MAX_VIDEO_MB` / `UPLOAD_MAX_DOCUMENT_MB` | 10 / 512 / 25 MB |
-| API, multipart (`POST /api/media`: images and documents) | `spring.servlet.multipart.max-file-size` / `max-request-size` | 32 MB / 40 MB |
+| API, per media kind | `UPLOAD_MAX_IMAGE_MB` / `UPLOAD_MAX_VIDEO_MB` / `UPLOAD_MAX_DOCUMENT_MB` | 200 / 512 / 200 MB |
+| API, multipart (`POST /api/media`: images and documents) | `spring.servlet.multipart.max-file-size` / `max-request-size` | 210 MB / 220 MB |
 | Host nginx, **both** the `dashboard-trainings` and the `api-trainings` vhost, and the admin portal's own nginx | `client_max_body_size` | 550m |
 
 **Images and documents** go multipart to `POST /api/media`, so they pass the
-per-kind ceiling, the 32 MB / 40 MB multipart limits and nginx. The multipart
-limits are sized for the largest multipart upload (the 25 MB document), not for
-video, on purpose: Tomcat spools a multipart part to disk in full before any
-controller sees it, so that figure is how much disk any authenticated caller can
-make the server write per request. Raise it together with
-`UPLOAD_MAX_IMAGE_MB` / `UPLOAD_MAX_DOCUMENT_MB` if either ever goes past 32 —
-otherwise the servlet rejects the file before the typed per-kind error can be
-produced.
+per-kind ceiling, the 210 MB / 220 MB multipart limits and nginx. The multipart
+limits are sized for the largest multipart upload (a 200 MB image or document),
+not for video, on purpose: Tomcat spools a multipart part to disk in full before
+any controller sees it, so that figure is how much disk a caller can make the
+server write per request. For the same reason `POST /api/media` is open only to
+`TUTOR`, `ADMIN` and `SUPER_ADMIN` accounts, and the check is made in the
+security filter chain, which answers `403` before any of the body is read — a
+`@PreAuthorize` on the controller would run only after the spooling. Nothing a
+participant does uploads a file (the public site never does), so a
+self-registered account cannot use this endpoint to fill the disk. Raise the
+multipart limits together with `UPLOAD_MAX_IMAGE_MB` / `UPLOAD_MAX_DOCUMENT_MB`
+if either ever goes past 210 — otherwise the servlet rejects the file before the
+typed per-kind error can be produced.
 
 **Video** bypasses multipart entirely: the portal streams it with
 `PUT /api/videos/{id}/content`, whose body is read as a raw stream and capped

@@ -34,13 +34,16 @@ import com.eduplatform.eduplatform_backend.tutor.web.dto.UpdateTutorProfileReque
 import com.eduplatform.eduplatform_backend.tutor.web.dto.UpdateTutorProfileRequest.Field;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -97,14 +100,32 @@ public class TutorService {
     }
 
     /**
-     * Files an expert application: a PENDING profile plus the approval request moderators work
-     * from. Reached from the portal (validated there) and from the OTP sign-up's verify step,
-     * which rebuilds the request from a row stored at the start step; a row stored before sign-up
-     * validated links and years could hold values no later profile save would accept, so those
-     * are dropped here rather than stored and served.
+     * Files an expert application from an existing account (the portal's apply endpoint): a PENDING
+     * profile plus the approval request moderators work from. The applicant has to name at least
+     * one area of expertise, a category or one of their own (400 EXPERTISE_REQUIRED).
      */
     @Transactional
     public TutorProfile apply(UUID userId, TutorApplyRequest req) {
+        return fileApplication(userId, req, true);
+    }
+
+    /**
+     * The same application, filed by the OTP sign-up's verify step, which rebuilds the request from
+     * the row stored at the start step. The areas were held to the rules there. A category an admin
+     * hid in the minutes since has already been dropped by the caller, and the application goes in
+     * even if that leaves no area at all: refusing it now, after the code was proven, would lose a
+     * sign-up the applicant can no longer correct.
+     */
+    @Transactional
+    public TutorProfile applyFromSignup(UUID userId, TutorApplyRequest req) {
+        return fileApplication(userId, req, false);
+    }
+
+    /**
+     * A row stored before sign-up validated links and years could hold values no later profile save
+     * would accept, so those are dropped here rather than stored and served.
+     */
+    private TutorProfile fileApplication(UUID userId, TutorApplyRequest req, boolean requireAnArea) {
         if (profiles.existsByUserId(userId)) {
             throw Errors.conflict("TUTOR_PROFILE_EXISTS",
                     "You already have an expert profile; edit it, or resubmit it if it was rejected");
@@ -112,7 +133,12 @@ public class TutorService {
         User user = users.findById(userId)
                 .orElseThrow(() -> Errors.notFound("USER_NOT_FOUND", "User does not exist"));
 
-        Set<Category> expertise = resolveCategories(req.categoryIds(), Set.of());
+        Set<Category> expertise = resolveCategories(
+                req.categoryIds() == null ? Set.of() : req.categoryIds(), Set.of());
+        List<String> customExpertise = CustomExpertise.normalize(req.customExpertise(), namesOf(expertise));
+        if (requireAnArea) {
+            CustomExpertise.requireAny(expertise, customExpertise);
+        }
 
         TutorProfile profile = TutorProfile.builder()
                 .user(user)
@@ -123,6 +149,7 @@ public class TutorService {
                 .linkedinUrl(webAddressOrNull(req.linkedinUrl()))
                 .approvalStatus(TutorApprovalStatus.PENDING)
                 .expertises(expertise)
+                .customExpertise(customExpertise)
                 .build();
         profile.setId(UUID.randomUUID());
         profile = profiles.save(profile);
@@ -223,6 +250,23 @@ public class TutorService {
                         "You have not applied to become a tutor yet"));
         initForMapping(p);
         return p;
+    }
+
+    /** Largest page the public directory hands out, the same cap as spring.data.web.pageable. */
+    private static final int PUBLIC_PAGE_MAX = 100;
+
+    /** The directory's one order: by name, then id, so a page boundary never splits a tie. */
+    private static final Sort PUBLIC_ORDER = Sort.by("displayName").ascending().and(Sort.by("id"));
+
+    /**
+     * The public expert directory: every approved expert whose account still exists, whether or
+     * not they have a published course yet. The order is fixed here, never taken from the caller
+     * (see TutorPublicController#list).
+     */
+    @Transactional(readOnly = true)
+    public Page<TutorProfile> listPublic(int page, int size) {
+        Pageable pageable = PageRequest.of(Math.max(page, 0), Math.min(Math.max(size, 1), PUBLIC_PAGE_MAX), PUBLIC_ORDER);
+        return listByStatus(TutorApprovalStatus.APPROVED, pageable);
     }
 
     /** The Tutors page's tabs: experts whose account still exists (see TutorProfileRepository). */
@@ -346,6 +390,17 @@ public class TutorService {
         if (req.getExpertiseCategoryIds() != null) {
             p.setExpertises(resolveCategories(req.getExpertiseCategoryIds(), p.getExpertises()));
         }
+        // Checked only when the edit touches the areas: a profile an administrator created by
+        // granting the TUTOR role starts with none, and editing its headline must still work. The
+        // custom labels are re-normalised even when only the categories were sent, so one that now
+        // repeats a newly picked category's name goes.
+        if (req.getExpertiseCategoryIds() != null || req.getCustomExpertise() != null) {
+            List<String> customExpertise = CustomExpertise.normalize(
+                    req.getCustomExpertise() != null ? req.getCustomExpertise() : p.getCustomExpertise(),
+                    namesOf(p.getExpertises()));
+            CustomExpertise.requireAny(p.getExpertises(), customExpertise);
+            p.setCustomExpertise(customExpertise);
+        }
 
         // Continue with what save() returns: with a hand-assigned id it merges, and anything
         // done to the instance passed in afterwards would not be the persisted state.
@@ -414,7 +469,12 @@ public class TutorService {
                 "researchGateUrl", p.getResearchGateUrl(),
                 "orcid", p.getOrcid(),
                 "githubUrl", p.getGithubUrl(),
-                "expertiseCategoryIds", p.getExpertises().stream().map(c -> c.getId().toString()).sorted().toList());
+                "expertiseCategoryIds", p.getExpertises().stream().map(c -> c.getId().toString()).sorted().toList(),
+                "customExpertise", List.copyOf(p.getCustomExpertise()));
+    }
+
+    private static List<String> namesOf(Set<Category> categories) {
+        return categories.stream().map(Category::getName).toList();
     }
 
     private static UUID idOf(MediaFile m) {

@@ -2,12 +2,12 @@ package com.eduplatform.eduplatform_backend.course.web.mapper;
 
 import com.eduplatform.eduplatform_backend.catalog.domain.Category;
 import com.eduplatform.eduplatform_backend.catalog.domain.Tag;
-import com.eduplatform.eduplatform_backend.common.enums.CourseType;
 import com.eduplatform.eduplatform_backend.course.domain.Course;
 import com.eduplatform.eduplatform_backend.course.domain.CourseModule;
 import com.eduplatform.eduplatform_backend.course.domain.Lesson;
 import com.eduplatform.eduplatform_backend.course.domain.OfflineCourseDetails;
 import com.eduplatform.eduplatform_backend.course.domain.OnlineCourseDetails;
+import com.eduplatform.eduplatform_backend.course.domain.SyllabusItem;
 import com.eduplatform.eduplatform_backend.tutor.domain.TutorProfile;
 import com.eduplatform.eduplatform_backend.course.web.dto.*;
 import org.mapstruct.Mapper;
@@ -42,6 +42,7 @@ public interface CourseMapper {
     @Mapping(target = "offlineDetails", source = "offlineDetails")
     @Mapping(target = "modules", expression = "java(toModuleDtos(course.getModules()))")
     @Mapping(target = "tutors", expression = "java(toTutorDtos(course))")
+    @Mapping(target = "syllabusItems", expression = "java(toSyllabusItemDtos(course.getSyllabusItems()))")
     CourseDto toDto(Course course);
 
     OnlineDetailsDto toOnline(OnlineCourseDetails d);
@@ -66,6 +67,19 @@ public interface CourseMapper {
         return lessons.stream()
                 .sorted(Comparator.comparingInt(Lesson::getOrderIndex))
                 .map(this::toLessonDto)
+                .toList();
+    }
+
+    /**
+     * Always a list, in stored order: the readers treat an empty one as "fall back to the legacy
+     * syllabus text", so null must never stand in for it. A plain column, loaded with the course,
+     * so this is safe after the transaction has closed.
+     */
+    default List<SyllabusItemDto> toSyllabusItemDtos(List<SyllabusItem> items) {
+        if (items == null) return List.of();
+        return items.stream()
+                .map(item -> new SyllabusItemDto(item.title(),
+                        item.description() == null ? "" : item.description()))
                 .toList();
     }
 
@@ -109,14 +123,15 @@ public interface CourseMapper {
     }
 
     /**
-     * Course length in seconds for both course types, so one catalog card and one
-     * duration filter can speak about either. The offline conversion rounds half up,
-     * matching Postgres' {@code round()} in the duration-bucket predicate — otherwise a
-     * card could show a length the bucket it was filtered into does not cover.
+     * Course length in seconds for every course type, so one catalog card and one
+     * duration filter can speak about any of them. In-person courses (OFFLINE and
+     * ONE_TIME) convert their contact hours, rounding half up to match Postgres'
+     * {@code round()} in the duration-bucket predicate — otherwise a card could show a
+     * length the bucket it was filtered into does not cover.
      */
     default Integer totalDurationSec(Course course) {
         if (course == null) return null;
-        if (course.getCourseType() == CourseType.OFFLINE) {
+        if (course.getCourseType() != null && course.getCourseType().isInPerson()) {
             OfflineCourseDetails offline = course.getOfflineDetails();
             if (offline == null || offline.getTotalHours() == null) return null;
             return offline.getTotalHours()

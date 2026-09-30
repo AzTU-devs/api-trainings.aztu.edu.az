@@ -19,7 +19,10 @@ public record CourseDto(
         String description,
         String requirements,
         String learningOutcomes,
+        /** Legacy free text; readers fall back to it only when {@code syllabusItems} is empty. */
         String syllabus,
+        /** The syllabus in display order; always an array, empty when the course has none. */
+        List<SyllabusItemDto> syllabusItems,
         UUID thumbnailMediaId,
         UUID trailerMediaId,
         CourseType courseType,
@@ -67,16 +70,16 @@ public record CourseDto(
                 .map(ModuleDto::withLessonContentHidden)
                 .toList();
         return new CourseDto(id, slug, title, subtitle, description, requirements, learningOutcomes, syllabus,
-                thumbnailMediaId, trailerMediaId, courseType, level, language, free, price, currency, status,
-                publishedAt, submittedAt, rejectionReason, ratingAvg, ratingCount, enrolledCount, tutorId,
+                syllabusItems, thumbnailMediaId, trailerMediaId, courseType, level, language, free, price, currency,
+                status, publishedAt, submittedAt, rejectionReason, ratingAvg, ratingCount, enrolledCount, tutorId,
                 tutorDisplayName, tutors, categoryIds, tagIds, onlineDetails, offlineDetails, outline, version);
     }
 
     /** Without the moderator's note, which is for the course's tutors and staff only. */
     public CourseDto withoutModerationNote() {
         return new CourseDto(id, slug, title, subtitle, description, requirements, learningOutcomes, syllabus,
-                thumbnailMediaId, trailerMediaId, courseType, level, language, free, price, currency, status,
-                publishedAt, submittedAt, null, ratingAvg, ratingCount, enrolledCount, tutorId,
+                syllabusItems, thumbnailMediaId, trailerMediaId, courseType, level, language, free, price, currency,
+                status, publishedAt, submittedAt, null, ratingAvg, ratingCount, enrolledCount, tutorId,
                 tutorDisplayName, tutors, categoryIds, tagIds, onlineDetails, offlineDetails, modules, version);
     }
 }

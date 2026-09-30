@@ -13,8 +13,10 @@ import java.util.Map;
  *
  * <p>The ceilings are configurable because they must stay in step with the reverse proxy's
  * {@code client_max_body_size} (550m, sized for the 512 MB video cap plus multipart overhead) and
- * with {@code spring.servlet.multipart.max-file-size}; the defaults here are those same numbers,
- * so the service is safe even if the properties file has not been updated.
+ * with {@code spring.servlet.multipart.max-file-size} (210MB, just above the 200 MB image and
+ * document ceilings that travel as multipart); the defaults here are those same numbers — 200 MB
+ * for an image, 512 MB for a video, 200 MB for a document — so the service is safe even if the
+ * properties file has not been updated.
  */
 @Component
 public class UploadPolicy {
@@ -37,9 +39,9 @@ public class UploadPolicy {
 
     private final Map<UploadKind, Long> ceilings = new EnumMap<>(UploadKind.class);
 
-    public UploadPolicy(@Value("${app.uploads.max-image-mb:10}") int maxImageMb,
+    public UploadPolicy(@Value("${app.uploads.max-image-mb:200}") int maxImageMb,
                         @Value("${app.uploads.max-video-mb:512}") int maxVideoMb,
-                        @Value("${app.uploads.max-document-mb:25}") int maxDocumentMb) {
+                        @Value("${app.uploads.max-document-mb:200}") int maxDocumentMb) {
         ceilings.put(UploadKind.IMAGE, megabytes(maxImageMb));
         ceilings.put(UploadKind.VIDEO, megabytes(maxVideoMb));
         ceilings.put(UploadKind.DOCUMENT, megabytes(maxDocumentMb));

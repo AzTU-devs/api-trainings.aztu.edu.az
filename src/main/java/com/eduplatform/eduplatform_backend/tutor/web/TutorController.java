@@ -67,9 +67,10 @@ public class TutorController {
     @PreAuthorize("hasAuthority('tutor:manage_self')")
     @Operation(summary = "Edit my tutor profile (partial)",
             description = "Merge-patch: an absent property is left unchanged; null, or a blank string for "
-                    + "text, clears it. expertiseCategoryIds, when sent, replaces the areas and must not be "
-                    + "empty. avatarMediaId must be a READY image you uploaded, or the one already set. "
-                    + "Approval status cannot be changed here.")
+                    + "text, clears it. expertiseCategoryIds and customExpertise, when sent, replace the "
+                    + "picked and the typed-in areas; together they must leave at least one "
+                    + "(400 EXPERTISE_REQUIRED). avatarMediaId must be a READY image you uploaded, or the one "
+                    + "already set. Approval status cannot be changed here.")
     public ApiResponse<TutorProfileDto> updateMe(@Valid @RequestBody UpdateTutorProfileRequest req,
                                                  @CurrentUser AuthenticatedPrincipal me) {
         return ApiResponse.ok(mapper.toDto(service.updateOwnProfile(me, req)));

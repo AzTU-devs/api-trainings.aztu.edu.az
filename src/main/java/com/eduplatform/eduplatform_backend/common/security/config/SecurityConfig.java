@@ -88,6 +88,17 @@ public class SecurityConfig {
                     .requestMatchers(HttpMethod.GET, "/api/public/**").permitAll()
                     // Pre-flight
                     .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+                    // Uploading a file is for the people who author courses, rooms and expert
+                    // profiles: tutors and staff. It is decided here, in the filter chain, and not
+                    // with @PreAuthorize on the controller, because Tomcat spools a multipart body
+                    // to disk in full before any controller code runs: a refusal there would come
+                    // after the server had written up to spring.servlet.multipart.max-file-size
+                    // (210 MB) for the caller. This rule answers 403 before the body is parsed or
+                    // spooled. Nothing a participant-only account does uploads a file — the public
+                    // site never uploads, and an expert applicant gets TUTOR when approved, before
+                    // the dashboard offers them anything to upload. The role comes from the access
+                    // token, which is refused as stale once the account's roles change.
+                    .requestMatchers(HttpMethod.POST, "/api/media").hasAnyRole("TUTOR", "ADMIN", "SUPER_ADMIN")
                     // Everything else needs a JWT
                     .anyRequest().authenticated())
             .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)

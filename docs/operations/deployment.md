@@ -404,7 +404,9 @@ curl -sI https://api-trainings.aztu.edu.az/api/public/courses \
   | grep -iE '^(content-security-policy|referrer-policy|permissions-policy|cross-origin-resource-policy)'  # all four
 
 # Request bodies over 1 MB reach the API through BOTH vhosts: 401 from the API,
-# not 413 from nginx.
+# not 413 from nginx. (Anonymous here. Signed in, only TUTOR, ADMIN and
+# SUPER_ADMIN may upload; a participant-only account gets 403 before the body
+# is read — see "Upload sizes" in DEPLOY.md.)
 for h in dashboard-trainings api-trainings; do
   head -c 2000000 /dev/zero | curl -s -o /dev/null -w "$h: %{http_code}\n" -X POST \
     -H 'Content-Type: application/octet-stream' --data-binary @- https://$h.aztu.edu.az/api/media

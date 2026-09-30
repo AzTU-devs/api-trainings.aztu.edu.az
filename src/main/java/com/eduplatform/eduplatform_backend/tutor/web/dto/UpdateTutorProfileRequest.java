@@ -10,6 +10,7 @@ import lombok.Getter;
 import lombok.Setter;
 
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
@@ -24,9 +25,11 @@ import java.util.UUID;
  * an expert could never remove a GitHub link or a portrait once set. Each setter records that its
  * property was present, which {@link #has} reports.
  *
- * <p>{@code expertiseCategoryIds} is the exception. An expert is always filed under at least one
- * area, as the application requires, so a list replaces the areas and null in any form leaves
- * them as they are.
+ * <p>{@code expertiseCategoryIds} and {@code customExpertise} are the exception: a list replaces
+ * them (an empty one clears) and null in any form leaves them as they are. An expert is always filed
+ * under at least one area, but it may be one of their own, so either list may be emptied as long as
+ * the two together keep one area; otherwise the edit is refused with 400 EXPERTISE_REQUIRED. The
+ * custom labels are normalised and bounded on the server (see CustomExpertise).
  *
  * <p>There is deliberately no approval status here: approving or rejecting stays with the
  * decision endpoint, and unknown properties are ignored.
@@ -96,8 +99,10 @@ public class UpdateTutorProfileRequest {
     @Size(max = 255) @HttpUrl
     private String githubUrl;
 
-    @Size(min = 1, message = "must name at least one area of expertise")
     private Set<@NotNull UUID> expertiseCategoryIds;
+
+    /** The expert's own areas, typed rather than picked from the catalogue. */
+    private List<String> customExpertise;
 
     /**
      * The profile's version as last read. When sent, a save based on an out-of-date copy is refused
@@ -131,5 +136,9 @@ public class UpdateTutorProfileRequest {
 
     public void setExpertiseCategoryIds(Set<UUID> expertiseCategoryIds) {
         this.expertiseCategoryIds = expertiseCategoryIds;
+    }
+
+    public void setCustomExpertise(List<String> customExpertise) {
+        this.customExpertise = customExpertise;
     }
 }

@@ -3,6 +3,7 @@ package com.eduplatform.eduplatform_backend.course.service;
 import com.eduplatform.eduplatform_backend.audit.service.AuditService;
 import com.eduplatform.eduplatform_backend.common.enums.TutorApprovalStatus;
 import com.eduplatform.eduplatform_backend.common.error.Errors;
+import com.eduplatform.eduplatform_backend.common.html.RichTextSanitizer;
 import com.eduplatform.eduplatform_backend.common.security.AuthenticatedPrincipal;
 import com.eduplatform.eduplatform_backend.course.domain.Course;
 import com.eduplatform.eduplatform_backend.course.domain.CourseModule;
@@ -34,6 +35,9 @@ import java.util.UUID;
  *       curriculum of the very courses they create. A staff edit to a course they are not the
  *       editor of is audited, since it changes someone else's work.</li>
  * </ul>
+ *
+ * <p>Module and lesson descriptions come from the dashboard's rich-text editor and are sanitised
+ * on every write, by staff and tutors alike (see RichTextSanitizer).
  */
 @Service
 public class CourseContentService {
@@ -43,15 +47,17 @@ public class CourseContentService {
     private final LessonRepository lessons;
     private final CourseMediaValidator mediaValidator;
     private final AuditService audit;
+    private final RichTextSanitizer richText;
 
     public CourseContentService(CourseRepository courses, CourseModuleRepository modules,
                                 LessonRepository lessons, CourseMediaValidator mediaValidator,
-                                AuditService audit) {
+                                AuditService audit, RichTextSanitizer richText) {
         this.courses = courses;
         this.modules = modules;
         this.lessons = lessons;
         this.mediaValidator = mediaValidator;
         this.audit = audit;
+        this.richText = richText;
     }
 
     // ---------------- modules ----------------
@@ -81,7 +87,7 @@ public class CourseContentService {
         CourseModule m = CourseModule.builder()
                 .course(course)
                 .title(req.title())
-                .description(req.description())
+                .description(richText.sanitize(req.description()))
                 .orderIndex(modules.nextOrderIndex(courseId))
                 .build();
         m.setId(UUID.randomUUID());
@@ -104,7 +110,7 @@ public class CourseContentService {
             throw orderIndexTaken("module", req.orderIndex());
         }
         m.setTitle(req.title());
-        m.setDescription(req.description());
+        m.setDescription(richText.sanitize(req.description()));
         m.setOrderIndex(req.orderIndex());
         CourseModule saved = modules.save(m);
         saved.getLessons().size();   // init lazy lessons for the response mapping
@@ -137,7 +143,7 @@ public class CourseContentService {
         Lesson l = Lesson.builder()
                 .module(module)
                 .title(req.title())
-                .description(req.description())
+                .description(richText.sanitize(req.description()))
                 .contentType(req.contentType())
                 .videoMedia(mediaValidator.resolve(
                         req.videoMediaId(), MediaField.lessonMaterial(req.contentType()), caller))
@@ -165,7 +171,7 @@ public class CourseContentService {
         // judged against the content type it has now.
         l.setVideoMedia(materialForUpdate(l, req, caller));
         l.setTitle(req.title());
-        l.setDescription(req.description());
+        l.setDescription(richText.sanitize(req.description()));
         l.setContentType(req.contentType());
         l.setVideoUrl(linkOrNull(req.videoUrl()));
         l.setDurationSeconds(req.durationSeconds());

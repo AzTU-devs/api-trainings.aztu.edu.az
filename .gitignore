@@ -40,3 +40,7 @@ build/
 ### Local runtime state (uploads, etc.) ###
 var/
 *.log
+
+# macOS AppleDouble sidecars: written next to every file on non-Apple
+# filesystems (exFAT drives). Binary, so a stray ._Foo.java breaks the build.
+._*

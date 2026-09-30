@@ -11,12 +11,16 @@ import com.eduplatform.eduplatform_backend.tutor.domain.TutorProfile;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.BatchSize;
+import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.annotations.SQLDelete;
 import org.hibernate.annotations.SQLRestriction;
+import org.hibernate.type.SqlTypes;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
@@ -53,8 +57,23 @@ public class Course extends SoftDeletable {
     @Column(name = "learning_outcomes", columnDefinition = "text")
     private String learningOutcomes;
 
+    /**
+     * The legacy free-text syllabus. Kept for the courses written before {@link #syllabusItems};
+     * readers show it only when the items are empty.
+     */
     @Column(name = "syllabus", columnDefinition = "text")
     private String syllabus;
+
+    /**
+     * The syllabus as an ordered list of titled entries. A JSONB array on the course row rather
+     * than a child table: the entries are only ever read with the course and replaced as a whole,
+     * never queried or referenced one by one, so a table would buy a join and nothing else. Always
+     * replaced with a new list, never changed in place, so Hibernate sees the change.
+     */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "syllabus_items", nullable = false, columnDefinition = "jsonb")
+    @Builder.Default
+    private List<SyllabusItem> syllabusItems = new ArrayList<>();
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "thumbnail_media_id")

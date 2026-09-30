@@ -208,6 +208,7 @@ class ExpertProfileEditTest extends AbstractIntegrationTest {
         assertThat(row.get("academic_title")).isNull();
     }
 
+    /** Emptied only while one of the expert's own areas remains; see CustomExpertiseTest. */
     @Test
     void expertiseCanBeReplacedButNotEmptied() {
         TestTutor tutor = newApprovedTutor("expert");
@@ -219,7 +220,7 @@ class ExpertProfileEditTest extends AbstractIntegrationTest {
         JsonNode dto = patchMe(token, Json.object("expertiseCategoryIds", List.of(second))).expectStatus(200).data();
         assertThat(Json.texts(dto.path("expertiseCategoryIds"))).containsExactly(second.toString());
 
-        expectFieldError(patchMe(token, Json.object("expertiseCategoryIds", List.of())), "expertiseCategoryIds");
+        patchMe(token, Json.object("expertiseCategoryIds", List.of())).expectError(400, "EXPERTISE_REQUIRED");
         patchMe(token, Json.object("expertiseCategoryIds", List.of(UUID.randomUUID())))
                 .expectError(400, "INVALID_CATEGORY");
         assertThat(jdbc.queryForList("select category_id from tutor_expertises where tutor_id = ?", UUID.class,
@@ -292,10 +293,13 @@ class ExpertProfileEditTest extends AbstractIntegrationTest {
         assertThat(avatarInDb(tutor.profileId())).isNull();
     }
 
-    /** An approved expert's avatar is public, so naming another user's upload would publish their file. */
+    /**
+     * An approved expert's avatar is public, so naming another user's upload would publish their file.
+     * The other uploader is an expert: a participant-only account cannot upload at all.
+     */
     @Test
     void anotherUsersUploadCannotBeTheAvatar() {
-        UUID someoneElses = uploadMedia(login(newUser("student", "USER").email()), "private.png", "image/png",
+        UUID someoneElses = uploadMedia(login(newApprovedTutor("other").email()), "private.png", "image/png",
                 TestFiles.png());
         TestTutor tutor = newApprovedTutor("expert");
 
@@ -314,7 +318,7 @@ class ExpertProfileEditTest extends AbstractIntegrationTest {
         String adminToken = newAdminToken();
         UUID adminsUpload = uploadMedia(adminToken, "portrait.png", "image/png", TestFiles.png());
         UUID expertsUpload = uploadMedia(login(tutor.email()), "mine.png", "image/png", TestFiles.png());
-        UUID thirdParty = uploadMedia(login(newUser("student", "USER").email()), "other.png", "image/png",
+        UUID thirdParty = uploadMedia(login(newApprovedTutor("third-party").email()), "other.png", "image/png",
                 TestFiles.png());
 
         patchAdmin(adminToken, tutor.profileId(), Json.object("avatarMediaId", thirdParty))

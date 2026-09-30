@@ -32,6 +32,7 @@
         <jjwt.version>0.12.6</jjwt.version>
         <springdoc.version>2.6.0</springdoc.version>
         <bucket4j.version>8.10.1</bucket4j.version>
+        <jsoup.version>1.23.2</jsoup.version>
     </properties>
 
     <dependencies>
@@ -142,6 +143,14 @@
             <groupId>org.mapstruct</groupId>
             <artifactId>mapstruct</artifactId>
             <version>${mapstruct.version}</version>
+        </dependency>
+
+        <!-- Rich-text sanitising: the course and lesson texts the dashboard's editor writes as
+             HTML are cleaned to an allowlist on the way in (RichTextSanitizer). -->
+        <dependency>
+            <groupId>org.jsoup</groupId>
+            <artifactId>jsoup</artifactId>
+            <version>${jsoup.version}</version>
         </dependency>
 
         <!-- Lombok -->

@@ -15,6 +15,7 @@ import com.eduplatform.eduplatform_backend.identity.web.dto.TutorRegisterRequest
 import com.eduplatform.eduplatform_backend.identity.web.dto.TutorRegisterResult;
 import com.eduplatform.eduplatform_backend.identity.web.dto.TutorRegisterVerifyRequest;
 import com.eduplatform.eduplatform_backend.tutor.domain.TutorProfile;
+import com.eduplatform.eduplatform_backend.tutor.service.CustomExpertise;
 import com.eduplatform.eduplatform_backend.tutor.service.TutorService;
 import com.eduplatform.eduplatform_backend.tutor.web.dto.TutorApplyRequest;
 import org.slf4j.Logger;
@@ -28,7 +29,9 @@ import org.springframework.transaction.annotation.Transactional;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
@@ -82,7 +85,9 @@ public class TutorSignupService {
         if (users.existsByEmailIgnoreCase(req.email())) {
             throw Errors.conflict("EMAIL_ALREADY_REGISTERED", "An account with this email already exists");
         }
-        for (UUID categoryId : req.categoryIds()) {
+        Set<UUID> categoryIds = req.categoryIds() == null ? Set.of() : req.categoryIds();
+        List<String> categoryNames = new ArrayList<>();
+        for (UUID categoryId : categoryIds) {
             // TutorRegisterRequest refuses a null id already; this keeps findById from turning one
             // that got past it into a server error.
             if (categoryId == null) {
@@ -93,7 +98,12 @@ public class TutorSignupService {
             if (!category.isActive()) {
                 throw Errors.badRequest("CATEGORY_INACTIVE", "Category " + category.getName() + " is not offered");
             }
+            categoryNames.add(category.getName());
         }
+        // Held to the rules here, before a code is mailed, so the verify step never has to refuse
+        // an application the applicant can no longer correct (see TutorService.applyFromSignup).
+        List<String> customExpertise = CustomExpertise.normalize(req.customExpertise(), categoryNames);
+        CustomExpertise.requireAny(categoryIds, customExpertise);
         Instant issuedBefore = Instant.now();
         Instant last = otps.lastIssuedAt(req.email()).orElse(null);
         if (last != null && last.isAfter(issuedBefore.minus(RESEND_COOLDOWN))) {
@@ -126,7 +136,8 @@ public class TutorSignupService {
                 .websiteUrl(trimToNull(req.websiteUrl()))
                 .linkedinUrl(trimToNull(req.linkedinUrl()))
                 .locale(normalisedLocale(req.locale()))
-                .categoryIds(req.categoryIds().stream().map(UUID::toString).toList())
+                .categoryIds(categoryIds.stream().map(UUID::toString).toList())
+                .customExpertise(customExpertise)
                 .otpHash(TokenHasher.sha256Hex(otp))
                 .attempts((short) 0)
                 .createdAt(now)
@@ -182,9 +193,9 @@ public class TutorSignupService {
         // apply() drops stored links that no longer pass.
         categoryIds.removeIf(id -> categories.findById(id).map(c -> !c.isActive()).orElse(true));
 
-        TutorProfile profile = tutorService.apply(user.getId(), new TutorApplyRequest(
+        TutorProfile profile = tutorService.applyFromSignup(user.getId(), new TutorApplyRequest(
                 row.getHeadline(), row.getBio(), row.getYearsExperience(),
-                row.getWebsiteUrl(), row.getLinkedinUrl(), categoryIds));
+                row.getWebsiteUrl(), row.getLinkedinUrl(), categoryIds, row.getCustomExpertise()));
 
         row.setConsumedAt(Instant.now());
         otps.save(row);

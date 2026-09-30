@@ -2,7 +2,6 @@ package com.eduplatform.eduplatform_backend.enrollment.service;
 
 import com.eduplatform.eduplatform_backend.audit.service.AuditService;
 import com.eduplatform.eduplatform_backend.common.enums.CourseStatus;
-import com.eduplatform.eduplatform_backend.common.enums.CourseType;
 import com.eduplatform.eduplatform_backend.common.enums.EnrollmentSource;
 import com.eduplatform.eduplatform_backend.common.enums.EnrollmentStatus;
 import com.eduplatform.eduplatform_backend.common.enums.LessonProgressStatus;
@@ -112,7 +111,8 @@ public class EnrollmentService {
                 .enrolledAt(Instant.now())
                 .build();
         e.setId(UUID.randomUUID());
-        if (course.getCourseType() == CourseType.OFFLINE && offlineDetails.claimSeat(courseId) == 0) {
+        // Every in-person training (OFFLINE and ONE_TIME) has seats; an online one does not.
+        if (course.getCourseType().isInPerson() && offlineDetails.claimSeat(courseId) == 0) {
             throw Errors.conflict("COURSE_FULL", "Every seat on this training is taken");
         }
         e = enrollments.save(e);
@@ -244,7 +244,7 @@ public class EnrollmentService {
         }
         e = enrollments.save(e);
         courses.incrementEnrolledCount(courseId);
-        if (course.getCourseType() == CourseType.OFFLINE) {
+        if (course.getCourseType().isInPerson()) {
             // Counted even past the limit: an administrator seating somebody by hand has decided
             // the room can take them, but the seat is still taken.
             offlineDetails.incrementEnrolledCount(courseId);
@@ -279,7 +279,7 @@ public class EnrollmentService {
             // Only a place that was counted is handed back; a PENDING_PAYMENT or REFUNDED row
             // never added to the tally, and decrementing it would under-report the course.
             courses.decrementEnrolledCount(courseId);
-            if (course.getCourseType() == CourseType.OFFLINE) {
+            if (course.getCourseType().isInPerson()) {
                 offlineDetails.decrementEnrolledCount(courseId);
             }
         }

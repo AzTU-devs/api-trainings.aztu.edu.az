@@ -18,13 +18,15 @@ import org.springframework.web.multipart.MultipartFile;
 import java.util.UUID;
 
 /**
- * Binary media upload & retrieval. Any authenticated user may upload (e.g. a
- * tutor attaching a lesson video/PDF); the returned {@code id} is then stored
- * on the owning entity (lesson {@code videoMediaId}, course thumbnail, etc.).
+ * Binary media upload & retrieval. Uploading is for tutors and staff (e.g. a tutor attaching a
+ * lesson PDF, an admin a room photo); the returned {@code id} is then stored on the owning entity
+ * (lesson {@code videoMediaId}, course thumbnail, etc.). That restriction lives in SecurityConfig's
+ * filter chain rather than here, because by the time this controller could refuse a request Tomcat
+ * has already spooled the whole multipart body to disk. Reading is open to any signed-in account,
+ * subject to MediaService's per-file access rules.
  *
- * <p>Uploads are restricted to the {@link AllowedMediaType} allowlist and verified against the
- * file's own leading bytes, because "any authenticated user" includes anyone who self-registered
- * as a student.
+ * <p>Uploads are also restricted to the {@link AllowedMediaType} allowlist and verified against
+ * the file's own leading bytes, so no role can store an executable or an SVG as an "image".
  */
 @RestController
 @RequestMapping("/api/media")

@@ -8,6 +8,7 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
@@ -22,6 +23,12 @@ import java.util.UUID;
  * <p>{@code offlineDetails} and {@code onlineDetails} are merged field by field too: a property
  * left null keeps its value.
  *
+ * <p>{@code syllabusItems} is a list, so it cannot be merged: null or absent leaves the syllabus as
+ * it is, {@code []} clears it, and any other list replaces it whole, in its order.
+ *
+ * <p>The rich-text fields are sanitised on write and bounded as on create (see
+ * CreateCourseRequest).
+ *
  * <p>{@code version} is the course's version as last read. When sent, a mismatch is refused with
  * 409 STALE_RESOURCE, so two people editing the same course cannot silently overwrite each other;
  * omitted, the edit is applied without that check.
@@ -30,9 +37,10 @@ public record UpdateCourseRequest(
         @Size(max = 160) String title,
         @Size(max = 255) String subtitle,
         @Size(max = 20000) String description,
-        @Size(max = 5000) String requirements,
-        @Size(max = 5000) String learningOutcomes,
+        @Size(max = 20000) String requirements,
+        @Size(max = 20000) String learningOutcomes,
         @Size(max = 20000) String syllabus,
+        @Size(max = 100) List<@NotNull @Valid SyllabusItemDto> syllabusItems,
         UUID thumbnailMediaId,
         UUID trailerMediaId,
         CourseLevel level,

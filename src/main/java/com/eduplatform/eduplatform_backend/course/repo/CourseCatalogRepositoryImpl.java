@@ -45,15 +45,18 @@ public class CourseCatalogRepositoryImpl implements CourseCatalogRepository {
     private static final String SEARCH_QUERY = "plainto_tsquery('simple', :q)";
 
     /**
-     * Course length in seconds, defined once for both course types so a single bucket
-     * filter covers the whole catalogue. NULL when the type-specific row is missing,
-     * which excludes the course from every bucket — exactly the courses whose
-     * {@code totalDurationSec} comes back null on the card.
+     * Course length in seconds, defined once for every course type so a single bucket
+     * filter covers the whole catalogue: online video seconds, or the contact hours of an
+     * in-person course (OFFLINE or ONE_TIME), whose detail row is the same table. NULL
+     * when the type-specific row is missing, which excludes the course from every bucket —
+     * exactly the courses whose {@code totalDurationSec} comes back null on the card
+     * (CourseMapper.totalDurationSec, which must list the same types).
      */
     private static final String DURATION_SECONDS = """
             case c.course_type
                 when 'ONLINE' then ocd.total_video_seconds
                 when 'OFFLINE' then round(fcd.total_hours * 3600)
+                when 'ONE_TIME' then round(fcd.total_hours * 3600)
             end""";
 
     private final EntityManager em;

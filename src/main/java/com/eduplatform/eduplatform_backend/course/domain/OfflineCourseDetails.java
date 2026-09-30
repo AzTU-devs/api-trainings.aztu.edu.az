@@ -5,8 +5,13 @@ import lombok.*;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.util.UUID;
 
+/**
+ * The in-person part of a course: an OFFLINE course's date range, or a ONE_TIME course's single
+ * date and hours, plus the seats and the place. Room bookings and sessions reference this row.
+ */
 @Entity
 @Table(name = "offline_course_details")
 @Getter
@@ -30,6 +35,16 @@ public class OfflineCourseDetails {
 
     @Column(name = "end_date", nullable = false)
     private LocalDate endDate;
+
+    /**
+     * When the day's teaching starts and ends. Required for a ONE_TIME course, whose total hours
+     * are derived from them; optional for an OFFLINE one. The table holds end after start (V22).
+     */
+    @Column(name = "start_time")
+    private LocalTime startTime;
+
+    @Column(name = "end_time")
+    private LocalTime endTime;
 
     @Column(name = "weekly_hours", precision = 4, scale = 1)
     private BigDecimal weeklyHours;

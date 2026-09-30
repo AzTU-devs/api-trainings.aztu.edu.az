@@ -4,6 +4,7 @@ import com.eduplatform.eduplatform_backend.common.enums.TutorApprovalStatus;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
@@ -15,6 +16,10 @@ import java.util.UUID;
  * are keyed on, and {@code avatarMediaId} is only needed by the dashboard's editor, while the
  * page itself loads {@code avatarUrl}. {@code approvalStatus} stays, because the site's expert
  * page and directory check it.
+ *
+ * <p>This is also what the site's expert directory reads its cards from: the directory is built from
+ * the catalogue's courses and fills each expert in from this profile, so {@code customExpertise}
+ * reaches the cards through here.
  */
 public record TutorPublicProfileDto(
         UUID id,
@@ -39,5 +44,7 @@ public record TutorPublicProfileDto(
         Instant approvedAt,
         BigDecimal ratingAvg,
         int ratingCount,
-        Set<UUID> expertiseCategoryIds
+        Set<UUID> expertiseCategoryIds,
+        /** Areas the expert typed in themselves, in their order; always a list, empty when none. */
+        List<String> customExpertise
 ) {}

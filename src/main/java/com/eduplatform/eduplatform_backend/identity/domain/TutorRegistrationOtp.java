@@ -6,6 +6,7 @@ import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -64,6 +65,15 @@ public class TutorRegistrationOtp {
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "category_ids", nullable = false, columnDefinition = "jsonb")
     private List<String> categoryIds;
+
+    /**
+     * The areas the applicant typed in themselves, already normalised (CustomExpertise), carried
+     * through to the profile the verify step creates.
+     */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "custom_expertise", nullable = false, columnDefinition = "jsonb")
+    @Builder.Default
+    private List<String> customExpertise = new ArrayList<>();
 
     @Column(name = "otp_hash", nullable = false, length = 64)
     private String otpHash;

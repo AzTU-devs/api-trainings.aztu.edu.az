@@ -109,8 +109,9 @@ public class RoomBookingService {
      * request is refused: the RRULE used to be stored as text and neither expanded nor priced, so
      * the fee and the conflict checks covered the first session only.
      *
-     * <p>An offline course named with the request must be one the tutor teaches; it used to be
-     * accepted and silently dropped.
+     * <p>An in-person course named with the request must be one the tutor teaches; it used to be
+     * accepted and silently dropped. OFFLINE and ONE_TIME courses both qualify: the booking points
+     * at the offline details row, which every in-person course has.
      */
     @Transactional
     public RoomBooking requestBooking(UUID userId, BookingCreateRequest req) {

@@ -8,6 +8,7 @@ import org.mapstruct.Mapper;
 import org.mapstruct.Mapping;
 import org.mapstruct.Named;
 
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -21,13 +22,20 @@ public interface TutorMapper {
     @Mapping(target = "avatarMediaId", source = "avatar.id")
     @Mapping(target = "avatarUrl", expression = "java(avatarUrl(tutor))")
     @Mapping(target = "expertiseCategoryIds", source = "expertises", qualifiedByName = "categoryIds")
+    @Mapping(target = "customExpertise", expression = "java(customExpertise(tutor))")
     TutorProfileDto toDto(TutorProfile tutor);
 
     @Mapping(target = "firstName", source = "user.firstName")
     @Mapping(target = "lastName",  source = "user.lastName")
     @Mapping(target = "avatarUrl", expression = "java(avatarUrl(tutor))")
     @Mapping(target = "expertiseCategoryIds", source = "expertises", qualifiedByName = "categoryIds")
+    @Mapping(target = "customExpertise", expression = "java(customExpertise(tutor))")
     TutorPublicProfileDto toPublicDto(TutorProfile tutor);
+
+    /** Always a list, so a client can render it without a null check; a plain column, safe off-session. */
+    default List<String> customExpertise(TutorProfile tutor) {
+        return tutor == null || tutor.getCustomExpertise() == null ? List.of() : List.copyOf(tutor.getCustomExpertise());
+    }
 
     @Named("categoryIds")
     default Set<UUID> categoryIds(Set<Category> categories) {

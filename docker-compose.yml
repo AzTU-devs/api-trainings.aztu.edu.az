@@ -90,9 +90,9 @@ services:
 
       # Upload ceilings (MB). Must stay in step with the admin portal's nginx
       # client_max_body_size and its VITE_UPLOAD_MAX_* values.
-      UPLOAD_MAX_IMAGE_MB:    ${UPLOAD_MAX_IMAGE_MB:-10}
+      UPLOAD_MAX_IMAGE_MB:    ${UPLOAD_MAX_IMAGE_MB:-200}
       UPLOAD_MAX_VIDEO_MB:    ${UPLOAD_MAX_VIDEO_MB:-512}
-      UPLOAD_MAX_DOCUMENT_MB: ${UPLOAD_MAX_DOCUMENT_MB:-25}
+      UPLOAD_MAX_DOCUMENT_MB: ${UPLOAD_MAX_DOCUMENT_MB:-200}
 
       # Free-only mode: no payment provider is integrated, so order creation is
       # refused and the public catalogue lists FREE courses only.

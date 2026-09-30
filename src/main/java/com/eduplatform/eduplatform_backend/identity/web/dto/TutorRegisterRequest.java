@@ -3,6 +3,7 @@ package com.eduplatform.eduplatform_backend.identity.web.dto;
 import com.eduplatform.eduplatform_backend.tutor.web.dto.HttpUrl;
 import jakarta.validation.constraints.*;
 
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
@@ -10,6 +11,11 @@ import java.util.UUID;
  * Public self-registration for tutors. Creates the user account AND a PENDING tutor
  * profile + approval request in one step. The account holds the USER role until an
  * admin approves the application, at which point the TUTOR role is granted.
+ *
+ * <p>The areas of expertise are {@code categoryIds}, picked from the catalogue, and
+ * {@code customExpertise}, typed in by the applicant; either may be empty or left out, but not both
+ * (400 EXPERTISE_REQUIRED). The custom labels are normalised and bounded by CustomExpertise, and
+ * travel on the pending sign-up row to the profile the verify step creates.
  */
 public record TutorRegisterRequest(
         // --- account ---
@@ -34,5 +40,6 @@ public record TutorRegisterRequest(
         @Min(0) @Max(80) Short yearsExperience,
         @Size(max = 255) @HttpUrl String websiteUrl,
         @Size(max = 255) @HttpUrl String linkedinUrl,
-        @NotNull @NotEmpty Set<@NotNull UUID> categoryIds
+        Set<@NotNull UUID> categoryIds,
+        List<String> customExpertise
 ) {}

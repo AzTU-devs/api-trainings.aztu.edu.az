@@ -9,12 +9,16 @@ import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.BatchSize;
 import org.hibernate.annotations.Formula;
+import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.annotations.SQLDelete;
 import org.hibernate.annotations.SQLRestriction;
+import org.hibernate.type.SqlTypes;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
@@ -127,4 +131,16 @@ public class TutorProfile extends SoftDeletable {
     @BatchSize(size = 50)
     @Builder.Default
     private Set<Category> expertises = new HashSet<>();
+
+    /**
+     * Areas of expertise the expert typed in themselves, next to the {@link #expertises} they
+     * picked from the catalogue: plain-text labels, normalised by CustomExpertise, in the order
+     * given. A JSONB array rather than a table, since they are only ever shown with the profile
+     * and replaced as a whole. Always replaced with a new list, never changed in place, so
+     * Hibernate sees the change.
+     */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "custom_expertise", nullable = false, columnDefinition = "jsonb")
+    @Builder.Default
+    private List<String> customExpertise = new ArrayList<>();
 }

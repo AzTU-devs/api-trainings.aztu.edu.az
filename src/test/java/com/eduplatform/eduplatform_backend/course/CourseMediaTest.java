@@ -119,10 +119,13 @@ class CourseMediaTest extends AbstractIntegrationTest {
         patch(token, course, Json.object("trailerMediaId", png)).expectError(422, "INVALID_MEDIA_FOR_FIELD");
     }
 
-    /** A published course's thumbnail is served anonymously, so this would publish someone else's private file. */
+    /**
+     * A published course's thumbnail is served anonymously, so this would publish someone else's
+     * private file. The other uploader is an expert: a participant-only account cannot upload at all.
+     */
     @Test
     void anotherUsersUploadCannotBeTheThumbnail() {
-        UUID someoneElses = uploadMedia(login(newUser("student", "USER").email()), "private.png", "image/png",
+        UUID someoneElses = uploadMedia(login(newApprovedTutor("other").email()), "private.png", "image/png",
                 TestFiles.png());
         String token = login(newApprovedTutor("tutor").email());
         CourseRef course = createCourse(token, courseRequest("borrowed", true));

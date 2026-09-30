@@ -27,8 +27,10 @@ public interface TutorProfileRepository extends JpaRepository<TutorProfile, UUID
     // who can still sign in, so they leave those profiles out. The courses that still name one
     // read the name through TutorProfile.displayName instead, and keep working.
 
+    // `join fetch`: every caller maps the account's name for each row, and a lazy one-to-one
+    // loaded one account per row — up to 100 queries for a page of the public directory.
     @Query(value = """
-           select t from TutorProfile t join t.user u
+           select t from TutorProfile t join fetch t.user u
            where t.approvalStatus = :status and u.deletedAt is null
            """,
            countQuery = """

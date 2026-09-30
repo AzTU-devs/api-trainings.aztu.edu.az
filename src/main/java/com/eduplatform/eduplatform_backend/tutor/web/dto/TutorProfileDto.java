@@ -4,6 +4,7 @@ import com.eduplatform.eduplatform_backend.common.enums.TutorApprovalStatus;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
@@ -46,6 +47,8 @@ public record TutorProfileDto(
         BigDecimal ratingAvg,
         int ratingCount,
         Set<UUID> expertiseCategoryIds,
+        /** Areas the expert typed in themselves, in their order; always a list, empty when none. */
+        List<String> customExpertise,
         /** The optimistic-lock version; send it back as {@code version} on PATCH. */
         long version
 ) {}

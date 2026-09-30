@@ -9,11 +9,14 @@ import com.eduplatform.eduplatform_backend.common.enums.BookingDecision;
 import com.eduplatform.eduplatform_backend.common.enums.CourseStatus;
 import com.eduplatform.eduplatform_backend.common.enums.CourseType;
 import com.eduplatform.eduplatform_backend.common.enums.TutorApprovalStatus;
+import com.eduplatform.eduplatform_backend.common.error.AppException;
 import com.eduplatform.eduplatform_backend.common.error.Errors;
+import com.eduplatform.eduplatform_backend.common.html.RichTextSanitizer;
 import com.eduplatform.eduplatform_backend.common.security.AuthenticatedPrincipal;
 import com.eduplatform.eduplatform_backend.course.domain.Course;
 import com.eduplatform.eduplatform_backend.course.domain.OfflineCourseDetails;
 import com.eduplatform.eduplatform_backend.course.domain.OnlineCourseDetails;
+import com.eduplatform.eduplatform_backend.course.domain.SyllabusItem;
 import com.eduplatform.eduplatform_backend.course.repo.CourseCatalogFilter;
 import com.eduplatform.eduplatform_backend.course.repo.CourseCatalogSort;
 import com.eduplatform.eduplatform_backend.course.repo.CourseRepository;
@@ -24,6 +27,7 @@ import com.eduplatform.eduplatform_backend.course.web.dto.CreateCourseRequest;
 import com.eduplatform.eduplatform_backend.course.web.dto.OfflineDetailsDto;
 import com.eduplatform.eduplatform_backend.course.web.dto.OnlineDetailsDto;
 import com.eduplatform.eduplatform_backend.course.web.dto.SetCourseTutorsRequest;
+import com.eduplatform.eduplatform_backend.course.web.dto.SyllabusItemDto;
 import com.eduplatform.eduplatform_backend.course.web.dto.UpdateCourseRequest;
 import com.eduplatform.eduplatform_backend.media.domain.MediaFile;
 import com.eduplatform.eduplatform_backend.notification.service.DecisionEvents;
@@ -38,8 +42,14 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -56,12 +66,13 @@ public class CourseService {
     private final CourseAccess access;
     private final LessonRepository lessons;
     private final ApplicationEventPublisher events;
+    private final RichTextSanitizer richText;
     private final boolean paymentsEnabled;
 
     public CourseService(CourseRepository courses, TutorProfileRepository tutors,
                          CategoryRepository categories, TagRepository tags, CourseMediaValidator mediaValidator,
                          AuditService audit, CourseAccess access, LessonRepository lessons,
-                         ApplicationEventPublisher events,
+                         ApplicationEventPublisher events, RichTextSanitizer richText,
                          @Value("${app.payments.enabled:false}") boolean paymentsEnabled) {
         this.courses = courses;
         this.tutors = tutors;
@@ -72,6 +83,7 @@ public class CourseService {
         this.access = access;
         this.lessons = lessons;
         this.events = events;
+        this.richText = richText;
         this.paymentsEnabled = paymentsEnabled;
     }
 
@@ -258,10 +270,11 @@ public class CourseService {
                 .slug(req.slug())
                 .title(req.title())
                 .subtitle(req.subtitle())
-                .description(req.description())
-                .requirements(req.requirements())
-                .learningOutcomes(req.learningOutcomes())
+                .description(richText.sanitize(req.description()))
+                .requirements(richText.sanitize(req.requirements()))
+                .learningOutcomes(richText.sanitize(req.learningOutcomes()))
                 .syllabus(req.syllabus())
+                .syllabusItems(syllabusItems(req.syllabusItems()))
                 .thumbnail(thumbnail)
                 .trailer(trailer)
                 .courseType(req.courseType())
@@ -314,10 +327,11 @@ public class CourseService {
                 .slug(c.slug())
                 .title(c.title())
                 .subtitle(c.subtitle())
-                .description(c.description())
-                .requirements(c.requirements())
-                .learningOutcomes(c.learningOutcomes())
+                .description(richText.sanitize(c.description()))
+                .requirements(richText.sanitize(c.requirements()))
+                .learningOutcomes(richText.sanitize(c.learningOutcomes()))
                 .syllabus(c.syllabus())
+                .syllabusItems(syllabusItems(c.syllabusItems()))
                 .thumbnail(thumbnail)
                 .trailer(trailer)
                 .courseType(c.courseType())
@@ -522,10 +536,12 @@ public class CourseService {
         }
         if (req.title() != null)            course.setTitle(req.title());
         if (req.subtitle() != null)         course.setSubtitle(req.subtitle());
-        if (req.description() != null)      course.setDescription(req.description());
-        if (req.requirements() != null)     course.setRequirements(req.requirements());
-        if (req.learningOutcomes() != null) course.setLearningOutcomes(req.learningOutcomes());
+        if (req.description() != null)      course.setDescription(richText.sanitize(req.description()));
+        if (req.requirements() != null)     course.setRequirements(richText.sanitize(req.requirements()));
+        if (req.learningOutcomes() != null) course.setLearningOutcomes(richText.sanitize(req.learningOutcomes()));
         if (req.syllabus() != null)         course.setSyllabus(req.syllabus());
+        // A whole new list, [] included: the syllabus is replaced, never merged item by item.
+        if (req.syllabusItems() != null)    course.setSyllabusItems(syllabusItems(req.syllabusItems()));
         if (req.level() != null)            course.setLevel(req.level());
         if (req.language() != null)         course.setLanguage(req.language());
         if (req.free() != null)             course.setFree(req.free());
@@ -538,11 +554,23 @@ public class CourseService {
         if (req.categoryIds() != null)      course.setCategories(resolveCategories(req.categoryIds(), course.getCategories()));
         if (req.tagIds() != null)           course.setTags(resolveTags(req.tagIds()));
 
-        if (req.onlineDetails() != null && course.getCourseType() == CourseType.ONLINE) {
+        // The type is fixed at creation; details for the other kind are ignored, as they always
+        // were, except on a one-time training, whose rules say it has no online part at all.
+        CourseType type = course.getCourseType();
+        if (req.onlineDetails() != null && type == CourseType.ONE_TIME) {
+            throw Errors.badRequest("INVALID_DETAILS", "ONE_TIME course cannot have online details");
+        }
+        if (req.onlineDetails() != null && type == CourseType.ONLINE) {
             mergeOnline(course, req.onlineDetails());
         }
-        if (req.offlineDetails() != null && course.getCourseType() == CourseType.OFFLINE) {
+        if (req.offlineDetails() != null && type.isInPerson()) {
             mergeOffline(course, req.offlineDetails());
+        }
+        // After every edit, not only one that sends offlineDetails: whatever the body held, a
+        // one-time training has to come out of it still on one day, with its hours, its seats and
+        // a total that matches them.
+        if (type == CourseType.ONE_TIME) {
+            settleOneTimeSchedule(course.getOfflineDetails());
         }
     }
 
@@ -625,8 +653,8 @@ public class CourseService {
 
     /**
      * An ONLINE course is its lessons; publishing one with none put an empty page in the
-     * catalogue that participants could enrol in. OFFLINE courses are exempt: their substance is
-     * the sessions in the room, and many carry no online material at all.
+     * catalogue that participants could enrol in. In-person courses, OFFLINE and ONE_TIME, are
+     * exempt: their substance is the time in the room, and many carry no online material at all.
      */
     private void requirePublishableContent(Course course) {
         if (course.getCourseType() == CourseType.ONLINE && lessons.countByCourseId(course.getId()) == 0) {
@@ -698,16 +726,101 @@ public class CourseService {
                 throw Errors.badRequest("INVALID_STUDENT_LIMIT", "studentLimit is required and must be positive");
             }
             requireValidOffline(offline.startDate(), offline.endDate(), offline.studentLimit());
+            requireTimeOrder(offline.startTime(), offline.endTime());
+        }
+        if (type == CourseType.ONE_TIME) {
+            if (offline == null) {
+                throw Errors.badRequest("OFFLINE_DETAILS_REQUIRED", "ONE_TIME course requires offlineDetails");
+            }
+            if (online != null) {
+                throw Errors.badRequest("INVALID_DETAILS", "ONE_TIME course cannot have online details");
+            }
+            if (offline.startDate() == null) {
+                throw Errors.badRequest("OFFLINE_DATES_REQUIRED", "A one-time training needs the date it takes place on");
+            }
+            // endDate may be left out; sent, it can only repeat the one day there is.
+            if (offline.endDate() != null && !offline.endDate().equals(offline.startDate())) {
+                throw notOneDay();
+            }
+            requireValidOneTime(offline.startTime(), offline.endTime(), offline.studentLimit());
         }
     }
 
-    private static void requireValidOffline(java.time.LocalDate start, java.time.LocalDate end, int studentLimit) {
+    private static void requireValidOffline(LocalDate start, LocalDate end, int studentLimit) {
         if (end.isBefore(start)) {
             throw Errors.badRequest("INVALID_DATE_RANGE", "endDate must be on or after startDate");
         }
         if (studentLimit <= 0) {
             throw Errors.badRequest("INVALID_STUDENT_LIMIT", "studentLimit must be positive");
         }
+    }
+
+    /**
+     * A one-time training's hours and seats. Its hours are what its length is worked out from, so
+     * unlike an OFFLINE course's they cannot be left out.
+     */
+    private static void requireValidOneTime(LocalTime start, LocalTime end, Integer studentLimit) {
+        if (start == null || end == null) {
+            throw Errors.badRequest("ONE_TIME_TIME_REQUIRED",
+                    "A one-time training needs a start time and an end time");
+        }
+        requireTimeOrder(start, end);
+        if (studentLimit == null || studentLimit <= 0) {
+            throw Errors.badRequest("INVALID_STUDENT_LIMIT", "studentLimit is required and must be positive");
+        }
+    }
+
+    /** Checked only when both times are there: an OFFLINE course may give either, both or neither. */
+    private static void requireTimeOrder(LocalTime start, LocalTime end) {
+        if (start != null && end != null && !end.isAfter(start)) {
+            throw Errors.badRequest("INVALID_TIME_RANGE", "endTime must be after startTime");
+        }
+    }
+
+    private static AppException notOneDay() {
+        return Errors.badRequest("INVALID_DATE_RANGE", "A one-time training takes place on a single day");
+    }
+
+    /**
+     * A one-time training's length: the minutes between its two times over 60, rounded half up to
+     * one decimal. Worked out here rather than taken from the client, so the catalogue's duration
+     * and its filter can never disagree with the hours the course page shows.
+     */
+    private static BigDecimal hoursBetween(LocalTime start, LocalTime end) {
+        return BigDecimal.valueOf(Duration.between(start, end).toMinutes())
+                .divide(BigDecimal.valueOf(60), 1, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * Holds an edited one-time training to its rules and re-derives what the server owns on it: the
+     * end date is the start date, there are no weekly hours, and the total comes from the times.
+     */
+    private static void settleOneTimeSchedule(OfflineCourseDetails od) {
+        if (od == null) {
+            throw Errors.badRequest("OFFLINE_DETAILS_REQUIRED", "ONE_TIME course requires offlineDetails");
+        }
+        requireValidOneTime(od.getStartTime(), od.getEndTime(), od.getStudentLimit());
+        od.setEndDate(od.getStartDate());
+        od.setWeeklyHours(null);
+        od.setTotalHours(hoursBetween(od.getStartTime(), od.getEndTime()));
+    }
+
+    /**
+     * The syllabus to store: titles trimmed, descriptions sanitised and never null. No list is no
+     * syllabus; on an update the caller has already taken null to mean "leave it".
+     */
+    private List<SyllabusItem> syllabusItems(List<SyllabusItemDto> items) {
+        List<SyllabusItem> out = new ArrayList<>();
+        if (items == null) return out;
+        for (SyllabusItemDto item : items) {
+            // The request DTOs refuse both already; this keeps one that got past them from being a 500.
+            if (item == null || item.title() == null || item.title().isBlank()) {
+                throw Errors.badRequest("INVALID_SYLLABUS_ITEM", "Every syllabus item needs a title");
+            }
+            String description = richText.sanitize(item.description());
+            out.add(new SyllabusItem(item.title().trim(), description == null ? "" : description));
+        }
+        return out;
     }
 
     /** A free course costs nothing; the database refuses any other price for it. */
@@ -729,11 +842,29 @@ public class CourseService {
                     .dripEnabled(false)
                     .build();
             course.setOnlineDetails(d);
+        } else if (type == CourseType.ONE_TIME) {
+            // endDate, weeklyHours and totalHours are the server's, whatever was sent: one day,
+            // no weekly rhythm, and a length that follows from the hours.
+            OfflineCourseDetails d = OfflineCourseDetails.builder()
+                    .course(course)
+                    .startDate(offline.startDate())
+                    .endDate(offline.startDate())
+                    .startTime(offline.startTime())
+                    .endTime(offline.endTime())
+                    .weeklyHours(null)
+                    .totalHours(hoursBetween(offline.startTime(), offline.endTime()))
+                    .studentLimit(offline.studentLimit())
+                    .city(offline.city())
+                    .addressLine(offline.addressLine())
+                    .build();
+            course.setOfflineDetails(d);
         } else {
             OfflineCourseDetails d = OfflineCourseDetails.builder()
                     .course(course)
                     .startDate(offline.startDate())
                     .endDate(offline.endDate())
+                    .startTime(offline.startTime())
+                    .endTime(offline.endTime())
                     .weeklyHours(offline.weeklyHours())
                     .totalHours(offline.totalHours())
                     .studentLimit(offline.studentLimit())
@@ -755,18 +886,31 @@ public class CourseService {
      * Merges only what the request carries. Every property used to be copied, so a PATCH naming
      * just the city nulled both dates and zeroed the student limit, and then failed on the
      * table's CHECKs with a bare 409.
+     *
+     * <p>A ONE_TIME course takes only what its rules leave to the client: endDate is accepted only
+     * as the (new) start date, and the weekly and total hours are ignored; applyUpdate then settles
+     * the schedule as a whole (see {@link #settleOneTimeSchedule}).
      */
     private void mergeOffline(Course course, OfflineDetailsDto d) {
         OfflineCourseDetails od = course.getOfflineDetails();
         if (od == null) return;
         if (d.startDate() != null)    od.setStartDate(d.startDate());
-        if (d.endDate() != null)      od.setEndDate(d.endDate());
-        if (d.weeklyHours() != null)  od.setWeeklyHours(d.weeklyHours());
-        if (d.totalHours() != null)   od.setTotalHours(d.totalHours());
+        if (d.startTime() != null)    od.setStartTime(d.startTime());
+        if (d.endTime() != null)      od.setEndTime(d.endTime());
         if (d.studentLimit() != null) od.setStudentLimit(d.studentLimit());
         if (d.city() != null)         od.setCity(d.city());
         if (d.addressLine() != null)  od.setAddressLine(d.addressLine());
+        if (course.getCourseType() == CourseType.ONE_TIME) {
+            if (d.endDate() != null && !d.endDate().equals(od.getStartDate())) {
+                throw notOneDay();
+            }
+            return;
+        }
+        if (d.endDate() != null)      od.setEndDate(d.endDate());
+        if (d.weeklyHours() != null)  od.setWeeklyHours(d.weeklyHours());
+        if (d.totalHours() != null)   od.setTotalHours(d.totalHours());
         requireValidOffline(od.getStartDate(), od.getEndDate(), od.getStudentLimit());
+        requireTimeOrder(od.getStartTime(), od.getEndTime());
     }
 
     /**

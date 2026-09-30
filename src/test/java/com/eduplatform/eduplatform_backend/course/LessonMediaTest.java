@@ -39,7 +39,7 @@ class LessonMediaTest extends AbstractIntegrationTest {
     /** A full PUT replaces the file, so an existing lesson is no back door. */
     @Test
     void anotherUsersPrivateUploadCannotReplaceAnExistingLessonVideo() {
-        UUID someoneElses = uploadMedia(login(newUser("student", "USER").email()), "private.mp4", "video/mp4",
+        UUID someoneElses = uploadMedia(login(newApprovedTutor("other").email()), "private.mp4", "video/mp4",
                 TestFiles.mp4());
         String token = login(newApprovedTutor("tutor").email());
         UUID own = uploadMedia(token, "lesson.mp4", "video/mp4", TestFiles.mp4());
