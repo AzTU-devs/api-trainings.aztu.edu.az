@@ -75,6 +75,10 @@ public final class ApiClient {
         return new Call(HttpMethod.DELETE, path);
     }
 
+    public Call options(String path) {
+        return new Call(HttpMethod.OPTIONS, path);
+    }
+
     /** One request being assembled. Nothing is sent until {@link #send()}. */
     public final class Call {
 

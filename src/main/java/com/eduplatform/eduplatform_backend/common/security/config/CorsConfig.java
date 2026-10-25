@@ -21,13 +21,14 @@ public class CorsConfig {
     CorsConfigurationSource corsConfigurationSource(CorsProperties props) {
         CorsConfiguration cfg = new CorsConfiguration();
         // Credentials are allowed (below), so every origin listed here can call the API as the
-        // signed-in user — list exact origins only, the site and the dashboard. Patterns are
-        // used only because setAllowedOrigins throws per request, not at startup, on the
-        // combination of credentials and "*"; with patterns that same "*" is accepted and
-        // reflects EVERY origin back with credentials, which is worse. StartupSecurityValidator
-        // therefore refuses to start outside dev on a wildcard, "null" or plain-http origin.
+        // signed-in user: exact origins only, the site and the dashboard. Exact matching, not
+        // patterns: with setAllowedOriginPatterns a "*" in CORS_ALLOWED_ORIGINS reflected EVERY
+        // origin back with credentials, which is what production was found doing. Here a "*"
+        // is never a wildcard, and StartupSecurityValidator refuses to start outside dev on a
+        // wildcard, "null", plain-http or localhost origin anyway. A request whose Origin is
+        // not listed gets 403 from the CORS filter, preflight or not.
         // The refresh-token cookie is guarded separately: see AuthController.cookieToken.
-        cfg.setAllowedOriginPatterns(props.allowedOrigins() == null ? List.of() : props.allowedOrigins());
+        cfg.setAllowedOrigins(props.allowedOrigins() == null ? List.of() : props.allowedOrigins());
         cfg.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         cfg.setAllowedHeaders(List.of("*"));
         // Retry-After is exposed because the auth rate limiter sends it with every 429, and a

@@ -57,7 +57,9 @@ EXPOSE 8080
 # Readiness, not the aggregate /actuator/health: the aggregate includes third-party
 # indicators (mail, etc.) whose failure would mark an otherwise-serving container
 # unhealthy. Readiness is scoped to the database in application-prod.properties.
+# 127.0.0.1, not localhost: production binds the app to IPv4 loopback only
+# (SERVER_ADDRESS in docker-compose.prod.yml), and localhost may resolve to ::1 first.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/actuator/health/readiness || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/actuator/health/readiness || exit 1
 
 ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS org.springframework.boot.loader.launch.JarLauncher"]

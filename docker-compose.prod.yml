@@ -52,6 +52,13 @@ services:
     # stops startup.
     environment:
       SPRING_PROFILES_ACTIVE: prod
+      # Loopback only. Under host networking the app would otherwise listen on every
+      # interface, so port 8080 on the server's public address would reach the API
+      # directly, past nginx: past its TLS, its /actuator deny and its security headers.
+      # Only UFW stood in the way. Everything that should reach the API already comes
+      # through 127.0.0.1: host nginx, the dashboard container's nginx, the public site's
+      # server-side calls (INTERNAL_API_URL) and the healthchecks.
+      SERVER_ADDRESS: 127.0.0.1
 
     # Longer than the app's own drain. application-prod.properties gives in-flight
     # requests 25s (server.shutdown=graceful, timeout-per-shutdown-phase=25s), but

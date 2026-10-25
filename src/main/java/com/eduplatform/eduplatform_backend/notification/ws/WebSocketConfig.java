@@ -43,9 +43,10 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
                 ? new String[0]
                 : cors.allowedOrigins().toArray(new String[0]);
         // An empty list allows same-origin handshakes only (Spring's default), never "*": a
-        // missing CORS_ALLOWED_ORIGINS must not open the socket to every site.
+        // missing CORS_ALLOWED_ORIGINS must not open the socket to every site. Exact origins,
+        // as in CorsConfig, so a "*" in the list is never a pattern.
         registry.addEndpoint("/ws")
-                .setAllowedOriginPatterns(origins)
+                .setAllowedOrigins(origins)
                 .addInterceptors(blockedIpHandshakeInterceptor)
                 .setHandshakeHandler(new org.springframework.web.socket.server.support.DefaultHandshakeHandler() {
                     @Override

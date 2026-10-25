@@ -37,11 +37,11 @@ import java.util.Map;
  *   <li>The Flyway path excludes {@code db/dev}, which seeds login-ready ADMIN and
  *       SUPER_ADMIN accounts sharing the password {@code Password123!}.</li>
  *   <li>CORS allows credentials, so every allowed origin can call the API as the signed-in
- *       user: no wildcard, no {@code null} origin and no plain-http origin.</li>
+ *       user: no wildcard, no {@code null}, no plain-http and no localhost or loopback origin.</li>
  * </ul>
  * It also warns about settings that start fine but are probably not what the operator meant
- * (localhost CORS origins, mail switched off, insecure cookies, rate limiting off, public API
- * docs, open admin self-registration, the retired {@code TRUST_FORWARD_HEADERS}).
+ * (mail switched off, insecure cookies, rate limiting off, public API docs, open admin
+ * self-registration, the retired {@code TRUST_FORWARD_HEADERS}).
  */
 @Component
 public class StartupSecurityValidator implements BeanFactoryPostProcessor {
@@ -86,7 +86,6 @@ public class StartupSecurityValidator implements BeanFactoryPostProcessor {
         checkJwtSecret(resolve("app.security.jwt.access-secret"));
         checkFlywayLocations(resolve("spring.flyway.locations"));
         checkCorsOrigins(resolve("app.cors.allowed-origins"));
-        warnOnLocalhostCors(resolve("app.cors.allowed-origins"));
         warnOnRiskyFlags();
         noteRetiredForwardHeaderFlag();
     }
@@ -119,10 +118,12 @@ public class StartupSecurityValidator implements BeanFactoryPostProcessor {
 
     /**
      * Every allowed origin is trusted with credentials (CorsConfig sets allowCredentials), so the
-     * list must name exact https origins. A wildcard pattern — "*" included, which
-     * setAllowedOriginPatterns accepts where setAllowedOrigins would not — reflected any site's
-     * Origin back with credentials; "null" is the origin of sandboxed frames and local files; and
-     * a plain-http origin can be impersonated by anyone on the network path.
+     * list must name exact https origins. A wildcard pattern reflected any site's Origin back
+     * with credentials; "null" is the origin of sandboxed frames and local files; a plain-http
+     * origin can be impersonated by anyone on the network path; and a localhost or loopback
+     * origin is whatever happens to run on the visitor's own machine, so with one listed any
+     * local page or dev server could call the production API as its signed-in user. Those
+     * belong to the dev profile, which skips this check.
      */
     private void checkCorsOrigins(String corsOrigins) {
         if (corsOrigins == null) return;
@@ -131,9 +132,7 @@ public class StartupSecurityValidator implements BeanFactoryPostProcessor {
             String origin = raw.trim();
             if (origin.isEmpty()) continue;
             String lower = origin.toLowerCase(Locale.ROOT);
-            boolean localhost = lower.startsWith("http://localhost") || lower.startsWith("http://127.0.0.1");
-            if (origin.contains("*") || lower.equals("null") || (lower.startsWith("http://") && !localhost)
-                    || !(lower.startsWith("http://") || lower.startsWith("https://"))) {
+            if (origin.contains("*") || !lower.startsWith("https://") || isLoopback(lower)) {
                 bad.add(origin);
             }
         }
@@ -142,8 +141,16 @@ public class StartupSecurityValidator implements BeanFactoryPostProcessor {
                     "Refusing to start: app.cors.allowed-origins (CORS_ALLOWED_ORIGINS) contains " + bad
                             + ". Credentials are allowed for every listed origin, so each must be an exact "
                             + "https:// origin such as https://dashboard-trainings.aztu.edu.az — no wildcards, "
-                            + "no \"null\", no plain http.");
+                            + "no \"null\", no plain http, no localhost or loopback address.");
         }
+    }
+
+    /** localhost, *.localhost, 127.0.0.0/8 and [::1], with or without a port. */
+    private static boolean isLoopback(String origin) {
+        String host = origin.replaceFirst("^[a-z]+://", "");
+        if (host.startsWith("[")) return host.startsWith("[::1]");
+        host = host.replaceFirst("[:/].*$", "");
+        return host.equals("localhost") || host.endsWith(".localhost") || host.startsWith("127.");
     }
 
     /**
@@ -217,13 +224,6 @@ public class StartupSecurityValidator implements BeanFactoryPostProcessor {
                     "Refusing to start: spring.flyway.locations includes '" + DEV_SEED_LOCATION
                             + "', which seeds ADMIN/SUPER_ADMIN accounts with a shared well-known password. "
                             + "Dev seeds must never be applied outside the dev profile.");
-        }
-    }
-
-    private void warnOnLocalhostCors(String corsOrigins) {
-        if (corsOrigins != null && corsOrigins.contains("localhost")) {
-            log.warn("app.cors.allowed-origins still contains a localhost entry outside the dev profile: {}. "
-                    + "Set CORS_ALLOWED_ORIGINS to the real frontend origins.", corsOrigins);
         }
     }
 

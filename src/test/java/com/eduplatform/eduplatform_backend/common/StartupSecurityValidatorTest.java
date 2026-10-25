@@ -46,6 +46,17 @@ class StartupSecurityValidatorTest {
         }
     }
 
+    /** Anything running on the visitor's own machine could otherwise call production as them. */
+    @Test
+    void aLocalhostOrLoopbackCorsOriginIsRefused() {
+        for (String origin : new String[]{"http://localhost:3000", "https://localhost", "http://127.0.0.1:5173",
+                "https://127.0.0.1", "http://[::1]:3000", "https://app.localhost"}) {
+            MockEnvironment env = production();
+            env.setProperty("app.cors.allowed-origins", "https://trainings.aztu.edu.az," + origin);
+            assertThatThrownBy(() -> validate(env)).as(origin).hasMessageContaining("CORS_ALLOWED_ORIGINS");
+        }
+    }
+
     @Test
     void thePlaceholderSecretIsRefusedInEveryProfile() {
         MockEnvironment env = new MockEnvironment();
