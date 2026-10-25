@@ -47,6 +47,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -457,7 +458,7 @@ public class CourseService {
         Course course = get(courseId);
         requirePublishableContent(course);
         CourseStatus previous = course.getStatus();
-        Instant now = Instant.now();
+        Instant now = dbNow();
         course.setStatus(CourseStatus.PUBLISHED);
         course.setApprovedAt(now);
         course.setApprovedBy(adminId);
@@ -585,7 +586,7 @@ public class CourseService {
         requirePublishableContent(course);
         course.setStatus(CourseStatus.IN_REVIEW);
         course.setRejectionReason(null);
-        course.setSubmittedAt(Instant.now());
+        course.setSubmittedAt(dbNow());
         return courses.save(course);
     }
 
@@ -598,7 +599,7 @@ public class CourseService {
         }
         if (decision == BookingDecision.APPROVED) {
             requirePublishableContent(course);
-            Instant now = Instant.now();
+            Instant now = dbNow();
             course.setStatus(CourseStatus.PUBLISHED);
             course.setApprovedAt(now);
             course.setApprovedBy(adminId);
@@ -684,6 +685,17 @@ public class CourseService {
     }
 
     // ---------- helpers ----------
+
+    /**
+     * The current time at the precision the database keeps. Postgres stores timestamps to the
+     * microsecond while a Linux clock reads in nanoseconds, so a course stamped with a plain
+     * Instant.now() answered with one publishedAt and, once reloaded, with a shorter one — the
+     * same instant, but not equal. macOS clocks read in microseconds, which is why this only
+     * showed on the Linux CI runners.
+     */
+    private static Instant dbNow() {
+        return Instant.now().truncatedTo(ChronoUnit.MICROS);
+    }
 
     private static UUID idOf(MediaFile m) {
         // Reading the id off a lazy proxy does not load the row.
