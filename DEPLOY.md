@@ -334,6 +334,23 @@ to `false` never protected anything: Spring's forwarded-header filter rewrote th
 remote address from `X-Forwarded-For` and `Forwarded` regardless. A leftover line
 in `.env` is ignored; delete it when convenient.
 
+## Releasing to the production server
+
+Once the server is set up (checklist below), releases go out with
+`deploy/deploy-trainings.sh`. It deploys the API, the dashboard and the public site
+together, each to a pinned commit. The usage is in the script's header.
+
+It runs read-only checks first: the compose setup, the `.env` files, the database,
+disk space and each host's TLS certificate. It then builds the new images while the old
+containers keep serving, and takes a backup. When the release brings new migrations, it
+runs them first on a copy of the database. Only then does it swap the containers and
+install `deploy/nginx/trainings.conf`, which it checks through nginx before reporting
+success.
+
+It also sets `CORS_ALLOWED_ORIGINS` to exactly the two sites and raises the upload
+limits to at least 200 MB, backing up each `.env` it changes. If it stops before the
+swap, it puts everything back. If it stops after, it prints the rollback commands.
+
 ## First deploy checklist
 
 1. Provision an empty Postgres database. Flyway creates the schema on first boot
