@@ -22,6 +22,8 @@ import com.eduplatform.eduplatform_backend.enrollment.web.dto.CourseParticipantD
 import com.eduplatform.eduplatform_backend.enrollment.web.dto.LessonProgressUpdateRequest;
 import com.eduplatform.eduplatform_backend.identity.domain.User;
 import com.eduplatform.eduplatform_backend.identity.repo.UserRepository;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
@@ -49,6 +51,9 @@ public class EnrollmentService {
     private final UserRepository users;
     private final OfflineCourseDetailsRepository offlineDetails;
     private final AuditService audit;
+
+    @PersistenceContext
+    private EntityManager entityManager;
 
     /** Roster order: newest grant first, with the id breaking ties so a page never repeats a row. */
     private static final Sort NEWEST_GRANT_FIRST = Sort.by(Sort.Order.desc("enrolledAt"), Sort.Order.asc("id"));
@@ -368,6 +373,11 @@ public class EnrollmentService {
             courses.recountEnrolled(courseId);
             offlineDetails.recountEnrolled(courseId);
         }
+        // Written, then let go. The caller removes the account next, in the same transaction, and
+        // since Hibernate 6.6 every flush fails (TransientObjectException) while a managed entity
+        // still points at a removed one, as these do through Enrollment.user.
+        enrollments.flush();
+        held.forEach(entityManager::detach);
         return held.size();
     }
 

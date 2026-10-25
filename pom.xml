@@ -7,10 +7,13 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <!-- Newest 3.3.x patch, taken for the CVE fixes in the managed Spring/Tomcat/
-             Jackson versions. Deliberately NOT 3.4/3.5: a minor upgrade changes
-             Hibernate and Security defaults and needs its own testing pass. -->
-        <version>3.3.13</version>
+        <!-- 3.5.x: the 3.3 line (Spring Framework 6.1, Security 6.3) gets no more
+             open-source fixes, and its Tomcat and Spring Security carried critical advisories.
+             Taken with its own full test pass (Spring Framework 6.2, Security 6.5,
+             Hibernate 6.6, Flyway 11). OSV still lists two spring-webmvc 6.2.19 advisories,
+             GHSA-pc63-qcmh-9cmg (XsltView) and GHSA-j9f9-w8pj-32f8 (Server-Sent Events);
+             the app uses neither. -->
+        <version>3.5.16</version>
         <relativePath/>
     </parent>
 
@@ -22,6 +25,14 @@
 
     <properties>
         <java.version>17</java.version>
+        <!-- Newer than Boot 3.5.16 manages (10.1.55, 42.7.11, 2.21.4, 1.5.34, 6.6.53.Final),
+             for the security advisories fixed since. Patch releases of the same lines; drop
+             each override once the parent manages that version or a newer one. -->
+        <tomcat.version>10.1.61</tomcat.version>
+        <postgresql.version>42.7.14</postgresql.version>
+        <jackson-bom.version>2.21.8</jackson-bom.version>
+        <logback.version>1.5.38</logback.version>
+        <hibernate.version>6.6.59.Final</hibernate.version>
         <mapstruct.version>1.6.3</mapstruct.version>
         <!-- 1.18.34 cannot compile on JDK 21+ at all: annotation processing dies with
              "ExceptionInInitializerError: TypeTag :: UNKNOWN". java.version stays 17
@@ -30,7 +41,9 @@
         <lombok.version>1.18.46</lombok.version>
         <lombok-mapstruct-binding.version>0.2.0</lombok-mapstruct-binding.version>
         <jjwt.version>0.12.6</jjwt.version>
-        <springdoc.version>2.6.0</springdoc.version>
+        <!-- 2.8.x is the springdoc line built for Spring Boot 3.5 (2.8.17 is built on 3.5.13);
+             2.6 targets Boot 3.3. 3.x is for Boot 4. -->
+        <springdoc.version>2.8.17</springdoc.version>
         <bucket4j.version>8.10.1</bucket4j.version>
         <jsoup.version>1.23.2</jsoup.version>
     </properties>
