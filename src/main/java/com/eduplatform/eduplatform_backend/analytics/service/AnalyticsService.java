@@ -11,6 +11,7 @@ import com.eduplatform.eduplatform_backend.course.repo.CourseRepository;
 import com.eduplatform.eduplatform_backend.enrollment.repo.EnrollmentRepository;
 import com.eduplatform.eduplatform_backend.identity.repo.UserRepository;
 import com.eduplatform.eduplatform_backend.room.repo.RoomBookingRepository;
+import com.eduplatform.eduplatform_backend.room.repo.RoomBookingSeriesRepository;
 import com.eduplatform.eduplatform_backend.room.repo.RoomRepository;
 import com.eduplatform.eduplatform_backend.tutor.repo.TutorProfileRepository;
 import org.springframework.data.domain.PageRequest;
@@ -35,6 +36,7 @@ public class AnalyticsService {
     private final EnrollmentRepository enrollments;
     private final RoomRepository rooms;
     private final RoomBookingRepository bookings;
+    private final RoomBookingSeriesRepository bookingSeries;
 
     /**
      * The university's zone. Days and months are Baku's: in UTC an enrolment made between midnight
@@ -44,6 +46,7 @@ public class AnalyticsService {
 
     public AnalyticsService(UserRepository users, TutorProfileRepository tutors, CourseRepository courses,
                             EnrollmentRepository enrollments, RoomRepository rooms, RoomBookingRepository bookings,
+                            RoomBookingSeriesRepository bookingSeries,
                             @Value("${app.timezone:Asia/Baku}") String zone) {
         this.users = users;
         this.tutors = tutors;
@@ -51,6 +54,7 @@ public class AnalyticsService {
         this.enrollments = enrollments;
         this.rooms = rooms;
         this.bookings = bookings;
+        this.bookingSeries = bookingSeries;
         this.zone = ZoneId.of(zone);
     }
 
@@ -103,7 +107,10 @@ public class AnalyticsService {
                 courses.countByStatus(CourseStatus.IN_REVIEW),
                 courses.countByStatus(CourseStatus.PUBLISHED),
                 rooms.count(),
-                bookings.countByStatus(BookingStatus.PENDING),
+                // Requests waiting for a decision: a long-term request is one decision,
+                // however many sessions it holds.
+                bookings.countByStatusAndSeriesIdIsNull(BookingStatus.PENDING)
+                        + bookingSeries.countByStatus(BookingStatus.PENDING),
                 enrollments.count());
     }
 

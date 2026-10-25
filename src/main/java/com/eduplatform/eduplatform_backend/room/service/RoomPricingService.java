@@ -13,6 +13,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
@@ -63,9 +65,33 @@ public class RoomPricingService {
      */
     @Transactional(readOnly = true)
     public Rate resolve(Room room, Instant startsAt, Instant endsAt) {
+        return pick(room, rules.findAllByRoomIdOrderByPriorityDesc(room.getId()), startsAt, endsAt);
+    }
+
+    /** A stretch of time to be priced. */
+    public record Period(Instant startsAt, Instant endsAt) {}
+
+    /**
+     * {@link #resolve} for many bookings of one room, in the order given, reading the room's
+     * rules once: a booking series has up to 200 occurrences.
+     */
+    @Transactional(readOnly = true)
+    public List<Rate> resolveAll(Room room, List<Period> periods) {
+        List<RoomPricingRule> roomRules = rules.findAllByRoomIdOrderByPriorityDesc(room.getId());
+        return periods.stream().map(p -> pick(room, roomRules, p.startsAt(), p.endsAt())).toList();
+    }
+
+    /** What a booking from {@code startsAt} to {@code endsAt} costs at {@code hourlyRate}, to the cent. */
+    public static BigDecimal fee(BigDecimal hourlyRate, Instant startsAt, Instant endsAt) {
+        BigDecimal hours = BigDecimal.valueOf(Duration.between(startsAt, endsAt).toMinutes())
+                .divide(BigDecimal.valueOf(60), 6, RoundingMode.HALF_UP);
+        return hourlyRate.multiply(hours).setScale(2, RoundingMode.HALF_UP);
+    }
+
+    private Rate pick(Room room, List<RoomPricingRule> roomRules, Instant startsAt, Instant endsAt) {
         ZonedDateTime start = startsAt.atZone(zone);
         ZonedDateTime end = endsAt.atZone(zone);
-        for (RoomPricingRule rule : rules.findAllByRoomIdOrderByPriorityDesc(room.getId())) {
+        for (RoomPricingRule rule : roomRules) {
             if (matches(rule, start, end)) {
                 return new Rate(rule.getHourlyRate(), rule.getCurrency());
             }

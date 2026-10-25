@@ -30,9 +30,12 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -218,11 +221,51 @@ public class EnrollmentService {
     @Transactional
     public CourseParticipantDto addParticipant(UUID courseId, AddParticipantRequest req) {
         Course course = requireCourse(courseId);
-        User user = resolveParticipant(req);
+        return toParticipantDto(grantPlace(course, resolveParticipant(req)));
+    }
 
+    /**
+     * {@link #addParticipant} for several accounts at once, as an admin creating a training seats
+     * its participants in the same step: each grant is the same one, with its counts and its audit
+     * entry. All or nothing: an id with no live account behind it is refused before anybody is
+     * seated, and the caller's transaction (the course just created) rolls back with it.
+     *
+     * <p>400 rather than the 404 of the single grant: the account is named in the body of a request
+     * that creates something else, so it is a fault in that request, not a missing resource.
+     *
+     * @param userIds in the order to seat them; a repeated id is seated once
+     * @return how many places were granted or already held
+     */
+    @Transactional
+    public int addParticipants(UUID courseId, Collection<UUID> userIds) {
+        Course course = requireCourse(courseId);
+        Set<UUID> ids = new LinkedHashSet<>(userIds);
+        // One query for the lot. Deleted accounts are not found: the entity hides them.
+        Map<UUID, User> found = new HashMap<>();
+        users.findAllById(ids).forEach(u -> found.put(u.getId(), u));
+        List<UUID> missing = ids.stream().filter(id -> !found.containsKey(id)).toList();
+        if (!missing.isEmpty()) {
+            throw Errors.badRequest("USER_NOT_FOUND", missing.size() == 1
+                    ? "User " + missing.get(0) + " does not exist"
+                    : "Users " + String.join(", ", missing.stream().limit(10).map(UUID::toString).toList())
+                            + (missing.size() > 10 ? " and " + (missing.size() - 10) + " more" : "")
+                            + " do not exist");
+        }
+        for (UUID id : ids) {
+            grantPlace(course, found.get(id));
+        }
+        return ids.size();
+    }
+
+    /**
+     * The grant itself. Granting a place somebody already holds changes nothing; a cancelled or
+     * refunded enrolment is reinstated.
+     */
+    private Enrollment grantPlace(Course course, User user) {
+        UUID courseId = course.getId();
         Enrollment e = enrollments.findByUserIdAndCourseId(user.getId(), courseId).orElse(null);
         if (e != null && holdsAPlace(e.getStatus())) {
-            return toParticipantDto(e);
+            return e;
         }
         EnrollmentStatus before = e == null ? null : e.getStatus();
         if (e == null) {
@@ -254,7 +297,7 @@ public class EnrollmentService {
                 before == null ? null : AuditService.snapshot("status", before.name()),
                 AuditService.snapshot("status", e.getStatus().name(), "source", e.getSource().name(),
                         "courseId", courseId.toString(), "userId", user.getId().toString()));
-        return toParticipantDto(e);
+        return e;
     }
 
     /**

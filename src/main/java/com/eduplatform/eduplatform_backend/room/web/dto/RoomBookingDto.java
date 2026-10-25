@@ -24,5 +24,7 @@ public record RoomBookingDto(
         BookingStatus status,
         BigDecimal totalFee,
         String currency,
-        Instant createdAt
+        Instant createdAt,
+        /** The series this booking is an occurrence of; null for a single booking. */
+        UUID seriesId
 ) {}

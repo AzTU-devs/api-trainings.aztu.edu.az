@@ -239,6 +239,15 @@
                     </compilerArgs>
                 </configuration>
             </plugin>
+            <plugin>
+                <!-- Tests run in UTC, like the production container, whatever the machine's
+                     zone. See EduplatformBackendApplication#main for why the zone matters. -->
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <argLine>-Duser.timezone=UTC</argLine>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
 </project>

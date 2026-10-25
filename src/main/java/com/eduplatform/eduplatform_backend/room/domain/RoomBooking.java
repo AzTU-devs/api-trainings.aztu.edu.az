@@ -52,6 +52,10 @@ public class RoomBooking extends SoftDeletable {
     @Formula("(select u.email from tutor_profiles t join users u on u.id = t.user_id where t.id = tutor_id)")
     private String tutorEmail;
 
+    /** The requester's account, whom a decision is sent to. */
+    @Formula("(select t.user_id from tutor_profiles t where t.id = tutor_id)")
+    private UUID tutorUserId;
+
     @Formula("(select c.title from courses c where c.id = offline_course_id)")
     private String offlineCourseTitle;
 
@@ -85,4 +89,11 @@ public class RoomBooking extends SoftDeletable {
     @Column(name = "currency", nullable = false, length = 3)
     @Builder.Default
     private String currency = "USD";
+
+    /**
+     * The series this booking is one occurrence of, or null for a single booking. An occurrence
+     * is requested, decided and cancelled through its series, never on its own.
+     */
+    @Column(name = "series_id")
+    private UUID seriesId;
 }

@@ -29,10 +29,13 @@ import com.eduplatform.eduplatform_backend.course.web.dto.OnlineDetailsDto;
 import com.eduplatform.eduplatform_backend.course.web.dto.SetCourseTutorsRequest;
 import com.eduplatform.eduplatform_backend.course.web.dto.SyllabusItemDto;
 import com.eduplatform.eduplatform_backend.course.web.dto.UpdateCourseRequest;
+import com.eduplatform.eduplatform_backend.enrollment.service.EnrollmentService;
 import com.eduplatform.eduplatform_backend.media.domain.MediaFile;
 import com.eduplatform.eduplatform_backend.notification.service.DecisionEvents;
 import com.eduplatform.eduplatform_backend.tutor.domain.TutorProfile;
 import com.eduplatform.eduplatform_backend.tutor.repo.TutorProfileRepository;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
@@ -68,12 +71,17 @@ public class CourseService {
     private final LessonRepository lessons;
     private final ApplicationEventPublisher events;
     private final RichTextSanitizer richText;
+    private final EnrollmentService enrollments;
     private final boolean paymentsEnabled;
+
+    @PersistenceContext
+    private EntityManager entityManager;
 
     public CourseService(CourseRepository courses, TutorProfileRepository tutors,
                          CategoryRepository categories, TagRepository tags, CourseMediaValidator mediaValidator,
                          AuditService audit, CourseAccess access, LessonRepository lessons,
                          ApplicationEventPublisher events, RichTextSanitizer richText,
+                         EnrollmentService enrollments,
                          @Value("${app.payments.enabled:false}") boolean paymentsEnabled) {
         this.courses = courses;
         this.tutors = tutors;
@@ -85,6 +93,7 @@ public class CourseService {
         this.lessons = lessons;
         this.events = events;
         this.richText = richText;
+        this.enrollments = enrollments;
         this.paymentsEnabled = paymentsEnabled;
     }
 
@@ -307,6 +316,11 @@ public class CourseService {
      * <p>The tutor-facing {@link #createByTutor} derives the tutor from the caller,
      * which cannot work here: a super admin has no tutor profile. The course belongs
      * to the university either way — {@code tutor} only records who may edit it.
+     *
+     * <p>The participants named in the request are seated in the same transaction, through the
+     * participants screen's own grant ({@link EnrollmentService#addParticipants}). That grant
+     * ignores publication, so a course that starts as a DRAFT can be given its people before it
+     * is published; an unknown account rolls the whole creation back.
      */
     @Transactional
     public Course createByAdmin(AuthenticatedPrincipal caller, AdminCreateCourseRequest req) {
@@ -350,11 +364,19 @@ public class CourseService {
 
         attachTypeSpecific(course, c.courseType(), c.onlineDetails(), c.offlineDetails());
         Course saved = courses.save(course);
+        List<UUID> participants = req.participantUserIds() == null ? List.of() : req.participantUserIds();
         audit.record(AuditService.Actions.CREATE, "COURSE", saved.getId(), null,
                 AuditService.snapshot(
                         "createdBy", "ADMIN",
                         "tutorCount", roster.size(),
                         "authorizedTutorId", authorized.getId().toString()));
+        if (!participants.isEmpty()) {
+            enrollments.addParticipants(saved.getId(), participants);
+            // The grants count each place with an UPDATE straight to the database, past the
+            // course this persistence context holds; re-read it (and its seats, by cascade) so the
+            // response says how many places it has.
+            entityManager.refresh(saved);
+        }
         initDetailGraph(saved);
         return saved;
     }

@@ -12,6 +12,7 @@ import com.eduplatform.eduplatform_backend.course.repo.OfflineCourseDetailsRepos
 import com.eduplatform.eduplatform_backend.course.service.CourseAccess;
 import com.eduplatform.eduplatform_backend.identity.domain.User;
 import com.eduplatform.eduplatform_backend.identity.repo.UserRepository;
+import com.eduplatform.eduplatform_backend.notification.service.DecisionEvents;
 import com.eduplatform.eduplatform_backend.room.domain.Room;
 import com.eduplatform.eduplatform_backend.room.domain.RoomBooking;
 import com.eduplatform.eduplatform_backend.room.domain.RoomBookingApproval;
@@ -23,6 +24,8 @@ import com.eduplatform.eduplatform_backend.tutor.domain.TutorProfile;
 import com.eduplatform.eduplatform_backend.tutor.repo.TutorProfileRepository;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -30,9 +33,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
-import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.UUID;
 
 /**
@@ -40,6 +44,10 @@ import java.util.UUID;
  *
  * <p>The lists read what they show from the booking's own columns (see RoomBooking), so a room
  * that was deleted after it was booked no longer takes every list holding its bookings down.
+ *
+ * <p>An occurrence of a booking series is managed through its series (RoomBookingSeriesService):
+ * these lists leave occurrences out, and cancelling or deciding one here is refused with 409
+ * PART_OF_SERIES, since doing so would quietly split one request into parts that disagree.
  */
 @Service
 public class RoomBookingService {
@@ -53,6 +61,8 @@ public class RoomBookingService {
     private final OfflineCourseDetailsRepository offlineCourses;
     private final UserRepository users;
     private final AuditService audit;
+    private final ApplicationEventPublisher events;
+    private final ZoneId zone;
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -60,7 +70,8 @@ public class RoomBookingService {
     public RoomBookingService(RoomBookingRepository bookings, RoomBookingApprovalRepository approvals,
                               RoomService roomService, RoomRepository rooms, RoomPricingService pricing,
                               TutorProfileRepository tutors, OfflineCourseDetailsRepository offlineCourses,
-                              UserRepository users, AuditService audit) {
+                              UserRepository users, AuditService audit, ApplicationEventPublisher events,
+                              @Value("${app.timezone:Asia/Baku}") String zone) {
         this.bookings = bookings;
         this.approvals = approvals;
         this.roomService = roomService;
@@ -70,11 +81,13 @@ public class RoomBookingService {
         this.offlineCourses = offlineCourses;
         this.users = users;
         this.audit = audit;
+        this.events = events;
+        this.zone = ZoneId.of(zone);
     }
 
     @Transactional(readOnly = true)
     public Page<RoomBooking> listByStatus(BookingStatus status, Pageable pageable) {
-        return bookings.findAllByStatus(status, pageable);
+        return bookings.findSinglesByStatus(status, pageable);
     }
 
     @Transactional(readOnly = true)
@@ -89,6 +102,7 @@ public class RoomBookingService {
         if (!booking.getTutor().getUser().getId().equals(userId)) {
             throw Errors.forbidden("NOT_BOOKING_OWNER", "Only the requesting tutor can cancel this booking");
         }
+        requireSingle(booking);
         if (booking.getStatus() == BookingStatus.CANCELLED) {
             return;
         }
@@ -134,9 +148,7 @@ public class RoomBookingService {
                 ? null : requireTaughtOfflineCourse(req.offlineCourseId(), userId);
 
         RoomPricingService.Rate rate = pricing.resolve(room, req.startsAt(), req.endsAt());
-        BigDecimal hours = BigDecimal.valueOf(Duration.between(req.startsAt(), req.endsAt()).toMinutes())
-                .divide(BigDecimal.valueOf(60), 6, RoundingMode.HALF_UP);
-        BigDecimal fee = rate.hourlyRate().multiply(hours).setScale(2, RoundingMode.HALF_UP);
+        BigDecimal fee = RoomPricingService.fee(rate.hourlyRate(), req.startsAt(), req.endsAt());
 
         RoomBooking booking = RoomBooking.builder()
                 .room(room)
@@ -164,11 +176,15 @@ public class RoomBookingService {
      * stays the last word for two approvals racing each other, and is mapped to the same 409
      * ROOM_TIME_TAKEN. Rejecting needs neither check, so a request for a room that has since been
      * retired or deleted can still be turned down.
+     *
+     * <p>The tutor is told, in app and by email, once the decision has committed (DecisionNotifier);
+     * a booking used to be decided without the tutor ever hearing of it.
      */
     @Transactional
     public RoomBooking decide(UUID bookingId, UUID adminUserId, BookingDecision decision, String note) {
         RoomBooking booking = bookings.findById(bookingId)
                 .orElseThrow(() -> Errors.notFound("BOOKING_NOT_FOUND", "Booking does not exist"));
+        requireSingle(booking);
         if (booking.getStatus() != BookingStatus.PENDING) {
             throw Errors.conflict("INVALID_BOOKING_TRANSITION",
                     "Booking is not pending and cannot receive a decision");
@@ -209,10 +225,33 @@ public class RoomBookingService {
         audit.record(approve ? AuditService.Actions.APPROVE : AuditService.Actions.REJECT,
                 "ROOM_BOOKING", booking.getId(), null,
                 AuditService.snapshot("status", booking.getStatus().name(), "note", note));
+        if (booking.getTutorUserId() != null) {
+            events.publishEvent(new DecisionEvents.RoomBookingDecided(booking.getTutorUserId(), booking.getId(),
+                    null, booking.getRoomName(), schedule(booking.getStartsAt(), booking.getEndsAt()),
+                    approve, note));
+        }
         return booking;
     }
 
-    private static void requireAvailable(Room room) {
+    /** "2026-11-02 10:00–12:00", in the platform's zone; the end's date is added when it differs. */
+    private String schedule(Instant startsAt, Instant endsAt) {
+        ZonedDateTime start = startsAt.atZone(zone);
+        ZonedDateTime end = endsAt.atZone(zone);
+        DateTimeFormatter time = DateTimeFormatter.ofPattern("HH:mm");
+        return start.toLocalDate() + " " + start.format(time) + "–"
+                + (end.toLocalDate().equals(start.toLocalDate()) ? "" : end.toLocalDate() + " ")
+                + end.format(time);
+    }
+
+    private static void requireSingle(RoomBooking booking) {
+        if (booking.getSeriesId() != null) {
+            throw Errors.conflict("PART_OF_SERIES",
+                    "This booking is one occurrence of a booking series; manage it through the series "
+                            + booking.getSeriesId());
+        }
+    }
+
+    static void requireAvailable(Room room) {
         if (room.getStatus() != RoomStatus.AVAILABLE) {
             throw Errors.conflict("ROOM_NOT_AVAILABLE",
                     "This room is " + room.getStatus() + " and cannot be booked");
@@ -223,7 +262,7 @@ public class RoomBookingService {
         return Errors.conflict("ROOM_TIME_TAKEN", "Requested time overlaps an existing approved booking");
     }
 
-    private OfflineCourseDetails requireTaughtOfflineCourse(UUID courseId, UUID userId) {
+    OfflineCourseDetails requireTaughtOfflineCourse(UUID courseId, UUID userId) {
         OfflineCourseDetails details = offlineCourses.findById(courseId)
                 .orElseThrow(() -> Errors.notFound("OFFLINE_COURSE_NOT_FOUND",
                         "No in-person training exists with id " + courseId));

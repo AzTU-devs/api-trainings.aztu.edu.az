@@ -108,6 +108,31 @@ public class DecisionNotifier {
         }
     }
 
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void onRoomBookingDecided(DecisionEvents.RoomBookingDecided ev) {
+        try {
+            User user = users.findById(ev.tutorUserId()).orElse(null);
+            if (user == null) return;
+            Text text = Text.of(user);
+            String room = ev.roomName() == null ? "" : ev.roomName();
+            String template = ev.approved() ? "room_booking.approved" : "room_booking.rejected";
+            String title = ev.approved()
+                    ? text.pick("Your booking of \"" + room + "\" was approved",
+                            "“" + room + "” otağı üçün sorğunuz təsdiqləndi")
+                    : text.pick("Your booking of \"" + room + "\" was not approved",
+                            "“" + room + "” otağı üçün sorğunuz təsdiqlənmədi");
+            String body = text.pick("Requested time: ", "Sorğu edilən vaxt: ") + ev.schedule();
+            Map<String, Object> payload = new HashMap<>();
+            if (ev.bookingId() != null) payload.put("bookingId", ev.bookingId().toString());
+            if (ev.seriesId() != null) payload.put("seriesId", ev.seriesId().toString());
+            payload.put("approved", ev.approved());
+            deliver(user, text, template, title, body, ev.note(), payload);
+        } catch (Exception ex) {
+            log.warn("Could not notify user {} about a room booking decision", ev.tutorUserId(), ex);
+        }
+    }
+
     private void deliver(User user, Text text, String template, String title, String body, String note,
                          Map<String, Object> payload) {
         String withNote = note == null || note.isBlank() ? body
